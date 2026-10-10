@@ -25,14 +25,33 @@ register_shutdown_function(function () {
 header('Content-Type: application/json; charset=utf-8');
 
 /* =========================================================
-   مسیرها
+   مسیر ریشه
 ========================================================= */
-$root = dirname(__DIR__, 2); // pages/api → pages → root
+$root = dirname(__DIR__, 2);
 
-$jobs = [
-    ['name' => 'worker', 'file' => $root . '/worker.php'],
-    ['name' => 'filter', 'file' => $root . '/filter.php'],
+/* =========================================================
+   ⭐ انتخاب کارها بر اساس پارامتر job
+   - worker : فقط worker.php
+   - filter : فقط filter.php
+   - all    : worker.php سپس filter.php   (پیش‌فرض)
+========================================================= */
+$job = strtolower((string)($_GET['job'] ?? $_POST['job'] ?? 'all'));
+
+$map = [
+    'worker' => [['name' => 'worker', 'file' => $root . '/worker.php']],
+    'filter' => [['name' => 'filter', 'file' => $root . '/filter.php']],
+    'all'    => [
+        ['name' => 'worker', 'file' => $root . '/worker.php'],
+        ['name' => 'filter', 'file' => $root . '/filter.php'],
+    ],
 ];
+
+if (!isset($map[$job])) {
+    echo json_encode(['status' => 'error', 'message' => 'پارامتر job نامعتبر'], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+$jobs = $map[$job];
 
 /* =========================================================
    HELPERS
@@ -48,7 +67,6 @@ function safe_substr(string $s, int $n): string
     return function_exists('mb_substr') ? mb_substr($s, -$n) : substr($s, -$n);
 }
 
-/** آیا تابع واقعاً قابل فراخوانی است؟ (function_exists کافی نیست) */
 function fn_enabled(string $name): bool
 {
     if (!function_exists($name)) return false;
@@ -120,19 +138,14 @@ function run_via_popen(string $phpBin, string $root, string $file): array
     return ['code' => (int)$code, 'output' => $out];
 }
 
-/**
- * HTTP fallback — درخواست به runner.php روی همان سرور.
- * این روش در هاست‌هایی که همه توابع اجرای فرمان را بسته‌اند کار می‌کند.
- */
 function run_via_http(string $jobName): array
 {
     $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
     $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    $self   = $_SERVER['SCRIPT_NAME'] ?? '';      // /.../pages/api/refresh.php
-    $dir    = rtrim(dirname($self), '/\\');        // /.../pages/api
+    $self   = $_SERVER['SCRIPT_NAME'] ?? '';
+    $dir    = rtrim(dirname($self), '/\\');
     $url    = $scheme . '://' . $host . $dir . '/runner.php?file=' . urlencode($jobName);
 
-    // ---- تلاش با file_get_contents ----
     if (ini_get('allow_url_fopen')) {
         $ctx = stream_context_create([
             'http' => [
@@ -144,12 +157,9 @@ function run_via_http(string $jobName): array
             'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
         ]);
         $out = @file_get_contents($url, false, $ctx);
-        if ($out !== false) {
-            return ['code' => 0, 'output' => (string)$out];
-        }
+        if ($out !== false) return ['code' => 0, 'output' => (string)$out];
     }
 
-    // ---- تلاش با cURL ----
     if (function_exists('curl_init')) {
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -169,11 +179,11 @@ function run_via_http(string $jobName): array
         return ['code' => 1, 'output' => 'cURL error: ' . $err];
     }
 
-    return ['code' => 1, 'output' => 'HTTP fallback unavailable (no fopen/curl)'];
+    return ['code' => 1, 'output' => 'HTTP fallback unavailable'];
 }
 
 /* =========================================================
-   انتخاب روش اجرا
+   انتخاب روش
 ========================================================= */
 $phpBin = php_binary();
 $method = null;
@@ -186,18 +196,18 @@ foreach (['exec', 'shell_exec', 'proc_open', 'popen'] as $fn) {
 if ($method === null) $method = 'http';
 
 /* =========================================================
-   اجرا — هر job در یک پروسه جداگانه
+   اجرا
 ========================================================= */
 $results   = [];
 $overallOk = true;
 
-foreach ($jobs as $job) {
+foreach ($jobs as $j) {
 
-    if (!is_file($job['file'])) {
+    if (!is_file($j['file'])) {
         $results[] = [
-            'name'    => $job['name'],
+            'name'    => $j['name'],
             'status'  => 'error',
-            'message' => 'فایل یافت نشد: ' . $job['file'],
+            'message' => 'فایل یافت نشد: ' . $j['file'],
         ];
         $overallOk = false;
         break;
@@ -205,26 +215,26 @@ foreach ($jobs as $job) {
 
     switch ($method) {
         case 'exec':
-            $r = run_via_exec($phpBin, $root, $job['file']);
+            $r = run_via_exec($phpBin, $root, $j['file']);
             break;
         case 'shell_exec':
-            $r = run_via_shell_exec($phpBin, $root, $job['file']);
+            $r = run_via_shell_exec($phpBin, $root, $j['file']);
             break;
         case 'proc_open':
-            $r = run_via_proc_open($phpBin, $root, $job['file']);
+            $r = run_via_proc_open($phpBin, $root, $j['file']);
             break;
         case 'popen':
-            $r = run_via_popen($phpBin, $root, $job['file']);
+            $r = run_via_popen($phpBin, $root, $j['file']);
             break;
         case 'http':
-            $r = run_via_http($job['name']);
+            $r = run_via_http($j['name']);
             break;
         default:
             $r = ['code' => 1, 'output' => 'no runner'];
     }
 
     $results[] = [
-        'name'   => $job['name'],
+        'name'   => $j['name'],
         'status' => $r['code'] === 0 ? 'ok' : 'error',
         'code'   => (int)$r['code'],
         'output' => safe_substr((string)$r['output'], 2000),
@@ -232,12 +242,13 @@ foreach ($jobs as $job) {
 
     if ($r['code'] !== 0) {
         $overallOk = false;
-        break; // اگر worker خطا داد، filter اجرا نشود
+        break;
     }
 }
 
 json_out([
     'status'  => $overallOk ? 'success' : 'error',
+    'job'     => $job,
     'method'  => $method,
     'php'     => $phpBin,
     'root'    => $root,
