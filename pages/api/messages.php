@@ -5,13 +5,11 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../db.php';
 
-/** نام جدول پیام‌ها */
 const MSG_TABLE = 'messages';
 
 try {
     $pdo = db();
 
-    // ----- ستون‌های جدول -----
     $cols = $pdo->query("SHOW COLUMNS FROM `" . MSG_TABLE . "`")
         ->fetchAll(PDO::FETCH_COLUMN);
 
@@ -20,20 +18,19 @@ try {
         return null;
     };
 
-    $COL_ID     = $pick(['id', 'message_id']);
-    $COL_TEXT   = $pick(['text', 'message', 'content', 'body', 'caption']);
-    $COL_SENDER = $pick(['sender_name', 'sender', 'from_name', 'username', 'first_name']);
-    $COL_GROUP  = $pick(['group_name', 'chat_title', 'group', 'chat_name']);
-    $COL_DATE   = $pick(['date_human', 'created_at', 'date', 'sent_at', 'inserted_at']);
-    $COL_LINK   = $pick(['link', 'url', 'message_link', 'source_url', 'original_url', 'tg_link']);
+    $COL_ID      = $pick(['id', 'message_id']);
+    $COL_TEXT    = $pick(['text', 'message', 'content', 'body', 'caption']);
+    $COL_SENDER  = $pick(['sender_name', 'sender', 'from_name', 'username', 'first_name']);
+    $COL_GROUP   = $pick(['group_name', 'chat_title', 'group', 'chat_name']);
+    $COL_CHATID  = $pick(['chat_id']);                           // ⭐ جدید
+    $COL_DATE    = $pick(['date_human', 'created_at', 'date', 'sent_at', 'inserted_at']);
+    $COL_LINK    = $pick(['link', 'url', 'message_link', 'source_url', 'original_url', 'tg_link']);
 
-    // ----- ورودی‌ها -----
     $q       = trim((string)($_GET['q'] ?? ''));
     $page    = max(1, (int)($_GET['page'] ?? 1));
     $perPage = 15;
     $offset  = ($page - 1) * $perPage;
 
-    // ----- شرط جستجو -----
     $where  = '';
     $params = [];
 
@@ -47,12 +44,10 @@ try {
         }
     }
 
-    // ----- Count -----
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM `" . MSG_TABLE . "` {$where}");
     $stmt->execute($params);
     $total = (int)$stmt->fetchColumn();
 
-    // ----- Data -----
     $orderBy = $COL_ID ? "`$COL_ID` DESC" : '1';
     $stmt = $pdo->prepare(
         "SELECT * FROM `" . MSG_TABLE . "` {$where} ORDER BY {$orderBy} LIMIT {$perPage} OFFSET {$offset}"
@@ -60,8 +55,7 @@ try {
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
 
-    // ----- نرمال‌سازی خروجی -----
-    $items = array_map(function (array $r) use ($COL_ID, $COL_TEXT, $COL_SENDER, $COL_GROUP, $COL_DATE, $COL_LINK) {
+    $items = array_map(function (array $r) use ($COL_ID, $COL_TEXT, $COL_SENDER, $COL_GROUP, $COL_CHATID, $COL_DATE, $COL_LINK) {
 
         $text = $COL_TEXT ? (string)($r[$COL_TEXT] ?? '') : '';
         $link = null;
@@ -76,6 +70,7 @@ try {
             'id'          => $COL_ID     ? ($r[$COL_ID]     ?? null) : null,
             'sender_name' => $COL_SENDER ? ($r[$COL_SENDER] ?? '')   : '',
             'group_name'  => $COL_GROUP  ? ($r[$COL_GROUP]  ?? '')   : '',
+            'chat_id'     => $COL_CHATID ? ($r[$COL_CHATID] ?? null) : null,   // ⭐ جدید
             'text'        => $text,
             'date'        => $COL_DATE   ? ($r[$COL_DATE]   ?? '')   : '',
             'link'        => $link,
