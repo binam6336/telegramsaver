@@ -13,7 +13,7 @@ function render_sidebar(string $current = ''): void
         <div class="sidebar-scroll">
             <div class="sidebar-brand">
                 <i class="fas fa-paper-plane"></i>
-                <span>ماهیار</span>
+                <span>مدیریت تلگرام</span>
             </div>
             <?php foreach ($items as $it): ?>
                 <a class="menu-item <?= $current === $it['key'] ? 'active' : '' ?>"
