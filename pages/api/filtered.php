@@ -59,19 +59,31 @@ function handle_list(PDO $pdo): void
         $where[] = 'vm.id IS NULL AND im.id IS NULL';
     }
 
-    /* ⭐ NOT EXISTS — هم چت‌های مسدود را حذف می‌کند هم NULL-safe است */
+    /* حذف چت‌های مسدود */
     $where[] = 'NOT EXISTS (
         SELECT 1 FROM `' . BLOCKED_TABLE . '` b
         WHERE b.chat_id = fm.chat_id
     )';
 
+    /* ⭐ placeholderهای یکتا */
     if ($q !== '') {
-        $where[] = '(fm.text LIKE :q
-                     OR fm.matched_keyword LIKE :q
-                     OR m.sender_name LIKE :q
-                     OR m.group_name LIKE :q)';
-        $params[':q'] = "%{$q}%";
+        $searchCols = [
+            'fm.text',
+            'fm.matched_keyword',
+            'm.sender_name',
+            'm.group_name',
+        ];
+        $parts = [];
+        $i = 0;
+        foreach ($searchCols as $c) {
+            $i++;
+            $ph = ':q' . $i;                // :q1..:q4
+            $parts[] = "$c LIKE $ph";
+            $params[$ph] = "%{$q}%";
+        }
+        $where[] = '(' . implode(' OR ', $parts) . ')';
     }
+
     if ($keyword !== '') {
         $where[] = 'fm.matched_keyword = :kw';
         $params[':kw'] = $keyword;
@@ -127,7 +139,7 @@ function handle_list(PDO $pdo): void
         ];
     }, $rows);
 
-    /* ⭐ لیست کلمات کلیدی فقط از چت‌های غیرمسدود */
+    /* لیست کلمات کلیدی فقط از چت‌های غیرمسدود */
     $stmt = $pdo->prepare(
         "SELECT DISTINCT fm.matched_keyword
          FROM `" . FM_TABLE . "` fm
@@ -215,7 +227,6 @@ function handle_toggle_irrelevant(PDO $pdo): void
 ========================================================= */
 function get_counts(PDO $pdo): array
 {
-    /* ⭐ هر سه شمارنده با NOT EXISTS روی چت‌های مسدود */
     $all = (int)$pdo->query(
         "SELECT COUNT(*) FROM `" . FM_TABLE . "` fm
          LEFT JOIN `" . VIEWED_TABLE . "` vm ON vm.filtered_message_id = fm.id

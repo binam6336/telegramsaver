@@ -19,13 +19,13 @@ try {
         return null;
     };
 
-    $COL_ID      = $pick(['id', 'message_id']);
-    $COL_TEXT    = $pick(['text', 'message', 'content', 'body', 'caption']);
-    $COL_SENDER  = $pick(['sender_name', 'sender', 'from_name', 'username', 'first_name']);
-    $COL_GROUP   = $pick(['group_name', 'chat_title', 'group', 'chat_name']);
-    $COL_CHATID  = $pick(['chat_id']);
-    $COL_DATE    = $pick(['date_human', 'created_at', 'date', 'sent_at', 'inserted_at']);
-    $COL_LINK    = $pick(['link', 'url', 'message_link', 'source_url', 'original_url', 'tg_link']);
+    $COL_ID     = $pick(['id', 'message_id']);
+    $COL_TEXT   = $pick(['text', 'message', 'content', 'body', 'caption']);
+    $COL_SENDER = $pick(['sender_name', 'sender', 'from_name', 'username', 'first_name']);
+    $COL_GROUP  = $pick(['group_name', 'chat_title', 'group', 'chat_name']);
+    $COL_CHATID = $pick(['chat_id']);
+    $COL_DATE   = $pick(['date_human', 'created_at', 'date', 'sent_at', 'inserted_at']);
+    $COL_LINK   = $pick(['link', 'url', 'message_link', 'source_url', 'original_url', 'tg_link']);
 
     $q       = trim((string)($_GET['q'] ?? ''));
     $page    = max(1, (int)($_GET['page'] ?? 1));
@@ -35,7 +35,7 @@ try {
     $where  = [];
     $params = [];
 
-    /* ⭐ زیرکوئری با مرجع صریح m.chat_id (نه chat_id تنها) */
+    /* ⭐ زیرکوئری با ارجاع صریح به m.chat_id */
     if ($COL_CHATID) {
         $where[] = "NOT EXISTS (
             SELECT 1 FROM `" . BLOCKED_TABLE . "` b
@@ -43,25 +43,33 @@ try {
         )";
     }
 
+    /* ⭐ حلقه جستجو با placeholderهای یکتا */
     if ($q !== '') {
         $searchable = array_values(array_filter([$COL_TEXT, $COL_SENDER, $COL_GROUP]));
         if ($searchable) {
             $parts = [];
-            foreach ($searchable as $c) $parts[] = "m.`$c` LIKE :q";
+            $i = 0;
+            foreach ($searchable as $c) {
+                $i++;
+                $ph = ':q' . $i;                // :q1, :q2, :q3
+                $parts[] = "m.`$c` LIKE $ph";
+                $params[$ph] = "%{$q}%";
+            }
             $where[] = '(' . implode(' OR ', $parts) . ')';
-            $params[':q'] = "%{$q}%";
         }
     }
 
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
-    /* ⭐ FROM حالا alias m دارد */
+    /* FROM با alias m */
     $baseFrom = "FROM `" . MSG_TABLE . "` m";
 
+    /* ---- COUNT ---- */
     $stmt = $pdo->prepare("SELECT COUNT(*) {$baseFrom} {$whereSql}");
     $stmt->execute($params);
     $total = (int)$stmt->fetchColumn();
 
+    /* ---- DATA ---- */
     $orderBy = $COL_ID ? "m.`$COL_ID` DESC" : '1';
     $stmt = $pdo->prepare(
         "SELECT m.* {$baseFrom} {$whereSql} ORDER BY {$orderBy} LIMIT {$perPage} OFFSET {$offset}"
