@@ -1573,3 +1573,5 @@ WHERE TABLE_SCHEMA = 'mahyarsa_telegram'
 ---
 
 این بلاک رو به آخر `AGENT.md` (بعد از نسخه 1.1) اضافه کن. کل تغییرات این session رو پوشش می‌ده 🚀
+
+v 1.0.1 released
