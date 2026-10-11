@@ -50,7 +50,6 @@ function handle_list(PDO $pdo): void
     $where  = [];
     $params = [];
 
-    // ---- فیلتر بر اساس تب ----
     if ($tab === 'viewed') {
         $where[] = 'vm.id IS NOT NULL';
     } elseif ($tab === 'irrelevant') {
@@ -60,7 +59,10 @@ function handle_list(PDO $pdo): void
     }
 
     if ($q !== '') {
-        $where[] = '(fm.text LIKE :q OR fm.matched_keyword LIKE :q OR m.sender_name LIKE :q OR m.group_name LIKE :q)';
+        $where[] = '(fm.text LIKE :q
+                     OR fm.matched_keyword LIKE :q
+                     OR m.sender_name LIKE :q
+                     OR m.group_name LIKE :q)';
         $params[':q'] = "%{$q}%";
     }
     if ($keyword !== '') {
@@ -70,9 +72,11 @@ function handle_list(PDO $pdo): void
 
     $whereSql = 'WHERE ' . implode(' AND ', $where);
 
-    /* ⭐ JOIN با messages برای گرفتن group_name و sender_name */
+    /* ⭐ JOIN اصلی: telegram_id + chat_id (قابل اعتمادترین) */
     $baseFrom = "FROM `" . FM_TABLE . "` fm
-                 LEFT JOIN `" . MSG_TABLE . "` m ON m.id = fm.message_id
+                 LEFT JOIN `" . MSG_TABLE . "` m
+                        ON m.telegram_id = fm.telegram_id
+                       AND m.chat_id     = fm.chat_id
                  LEFT JOIN `" . VIEWED_TABLE . "` vm ON vm.filtered_message_id = fm.id
                  LEFT JOIN `" . IRREL_TABLE  . "` im ON im.filtered_message_id = fm.id";
 
@@ -83,8 +87,9 @@ function handle_list(PDO $pdo): void
 
     // ---- Data ----
     $stmt = $pdo->prepare(
-        "SELECT fm.id, fm.message_id, fm.sender_id, fm.text, fm.link,
-                fm.date_human, fm.matched_keyword, fm.click_count,
+        "SELECT fm.id, fm.message_id, fm.telegram_id, fm.chat_id,
+                fm.sender_id, fm.text, fm.link, fm.date_human,
+                fm.matched_keyword, fm.click_count,
                 m.sender_name AS sender_name,
                 m.group_name  AS group_name,
                 vm.id AS viewed_id, vm.viewed_at,
@@ -97,10 +102,21 @@ function handle_list(PDO $pdo): void
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
 
+    /* ⭐ حالت دیباگ: با ?debug=1 می‌توانید ببینید join چه چیزی برگردانده */
+    if (!empty($_GET['debug'])) {
+        json_ok([
+            'debug'    => true,
+            'sample'   => array_slice($rows, 0, 3),
+            'join_on'  => 'm.telegram_id = fm.telegram_id AND m.chat_id = fm.chat_id',
+        ]);
+    }
+
     $items = array_map(static function (array $r): array {
         return [
             'id'              => (int)$r['id'],
             'message_id'      => $r['message_id'],
+            'telegram_id'     => $r['telegram_id'],
+            'chat_id'         => $r['chat_id'],
             'sender_id'       => $r['sender_id'],
             'sender_name'     => $r['sender_name'] ?? '',
             'group_name'      => $r['group_name']  ?? '',
@@ -116,7 +132,6 @@ function handle_list(PDO $pdo): void
         ];
     }, $rows);
 
-    // ---- لیست کلمات کلیدی ----
     $keywords = $pdo->query(
         "SELECT DISTINCT matched_keyword FROM `" . FM_TABLE . "` ORDER BY matched_keyword"
     )->fetchAll(PDO::FETCH_COLUMN);
