@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 set_time_limit(0);
@@ -22,8 +23,8 @@ const AI_PARALLEL    = 15;
 const AI_MAX_RUNTIME = 600;
 const AI_TEXT_LIMIT  = 500;
 
-const FUZZY_MAX_DIST = 1;     // حداکثر فاصله Levenshtein
-const FUZZY_MIN_WORD = 4;     // حداقل طول کلمه برای چک فازی
+const FUZZY_MAX_DIST = 1;
+const FUZZY_MIN_WORD = 4;
 
 try {
     Database::connect($config['db']);
@@ -47,7 +48,6 @@ try {
         exit;
     }
 
-    // نسخه نرمال‌شده هر کلیدواژه
     $normalizedKeywords = [];
     foreach ($keywordList as $kw) {
         $normalizedKeywords[$kw] = normalizePersianAggressive($kw);
@@ -59,8 +59,8 @@ try {
     // ۲) پیام‌ها
     // ============================================================
     $stmt = $pdo->query(
-        'SELECT `id`, `telegram_id`, `chat_id`, `sender_id`, `text`, `link`,
-                `date`, `date_human`, `created_at`
+        'SELECT `id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
+                `text`, `link`, `date`, `date_human`, `created_at`
          FROM `messages`
          WHERE `text` IS NOT NULL AND `text` != ""
          ORDER BY `id` ASC'
@@ -79,9 +79,9 @@ try {
     // ============================================================
     $insertStmt = $pdo->prepare(
         'INSERT IGNORE INTO `filtered_messages`
-        (`message_id`, `telegram_id`, `chat_id`, `sender_id`, `text`, `link`,
-         `date`, `date_human`, `matched_keyword`, `original_created_at`)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        (`message_id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
+         `text`, `link`, `date`, `date_human`, `matched_keyword`, `original_created_at`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
 
     $messagesById = [];
@@ -90,7 +90,7 @@ try {
     }
 
     // ============================================================
-    // ۴) لایه ۱+۲: نرمال‌سازی + فازی روی همه پیام‌ها
+    // ۴) لایه ۱+۲: نرمال‌سازی + فازی
     // ============================================================
     $totalNew    = 0;
     $preFilterHit = [];
@@ -105,13 +105,11 @@ try {
         foreach ($normalizedKeywords as $origKw => $normKw) {
             if ($normKw === '') continue;
 
-            // ---- چک ۱: زیررشته در متن نرمال‌شده ----
             if (mb_strpos($norm, $normKw) !== false) {
                 $matchedKw = $origKw;
                 break;
             }
 
-            // ---- چک ۲: فازی روی کلمه‌به‌کلمه ----
             if (hasFuzzyMatch($words, $normKw, $origKw)) {
                 $matchedKw = $origKw;
                 break;
@@ -132,9 +130,18 @@ try {
         if (!$msg) continue;
 
         $insertStmt->execute([
-            $msg['id'], $msg['telegram_id'], $msg['chat_id'], $msg['sender_id'],
-            $msg['text'], $msg['link'], $msg['date'], $msg['date_human'],
-            $kw, $msg['created_at'],
+            $msg['id'],
+            $msg['telegram_id'],
+            $msg['chat_id'],
+            $msg['group_name'],
+            $msg['sender_id'],
+            $msg['sender_name'],
+            $msg['text'],
+            $msg['link'],
+            $msg['date'],
+            $msg['date_human'],
+            $kw,
+            $msg['created_at'],
         ]);
         if ($insertStmt->rowCount() > 0) $preFilterCount++;
     }
@@ -146,7 +153,7 @@ try {
     ]);
 
     // ============================================================
-    // ۵) لایه ۳: AI روی بقیه
+    // ۵) لایه ۳: AI
     // ============================================================
     $aiMatched = 0;
 
@@ -182,9 +189,18 @@ try {
                 $matchedWord = (string) ($row['w'] ?? 'AI-match');
 
                 $insertStmt->execute([
-                    $msg['id'], $msg['telegram_id'], $msg['chat_id'], $msg['sender_id'],
-                    $msg['text'], $msg['link'], $msg['date'], $msg['date_human'],
-                    mb_substr($matchedWord, 0, 190), $msg['created_at'],
+                    $msg['id'],
+                    $msg['telegram_id'],
+                    $msg['chat_id'],
+                    $msg['group_name'],
+                    $msg['sender_id'],
+                    $msg['sender_name'],
+                    $msg['text'],
+                    $msg['link'],
+                    $msg['date'],
+                    $msg['date_human'],
+                    mb_substr($matchedWord, 0, 190),
+                    $msg['created_at'],
                 ]);
                 if ($insertStmt->rowCount() > 0) $totalNew++;
             }
@@ -215,7 +231,6 @@ try {
         'total_in_table' => $totalInTable,
         'duration_sec'   => $duration,
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-
 } catch (Throwable $e) {
     Logger::critical('خطای کلی', 'Fatal error', [
         'message' => $e->getMessage(),
@@ -228,47 +243,65 @@ try {
 
 // ============================================================
 // 🧹 نرمال‌سازی خشن فارسی
-// - حذف ZWNJ، نیم‌فاصله، BOM
-// - حذف اعراب
-// - یکسان‌سازی ی/ک/ه عربی
-// - حذف فاصله‌ها و نویسه‌های کنترلی
-// - فروپاشی حروف تکراری (سس → س، رر → ر ...)
-// - lowercase
 // ============================================================
 function normalizePersianAggressive(string $text): string
 {
-    // 1. ZWNJ و BOM و نویسه‌های نامرئی
     $text = str_replace(
         ["\xE2\x80\x8C", "\xE2\x80\x8B", "\xEF\xBB\xBF", "\xE2\x80\x8D", "\xE2\x80\x8E", "\xE2\x80\x8F"],
         '',
         $text
     );
 
-    // 2. اعراب
     $text = preg_replace('/[\x{064B}-\x{065F}\x{0670}\x{06D6}-\x{06ED}]/u', '', $text);
 
-    // 3. یکسان‌سازی حروف عربی/فارسی
     $map = [
-        'ي' => 'ی', 'ى' => 'ی', 'ﻯ' => 'ی', 'ﻰ' => 'ی', 'ﻱ' => 'ی',
-        'ك' => 'ک', 'ﻙ' => 'ک', 'ﻚ' => 'ک',
-        'ة' => 'ه', 'ۀ' => 'ه', 'ﻩ' => 'ه', 'ﻪ' => 'ه',
-        'أ' => 'ا', 'إ' => 'ا', 'آ' => 'ا', 'ٱ' => 'ا', 'ٲ' => 'ا', 'ٳ' => 'ا',
-        'ؤ' => 'و', 'ئ' => 'ی',
-        '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
-        '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
-        '۰' => '0', '۱' => '1', '۲' => '2', '۳' => '3', '۴' => '4',
-        '۵' => '5', '۶' => '6', '۷' => '7', '۸' => '8', '۹' => '9',
+        'ي' => 'ی',
+        'ى' => 'ی',
+        'ﻯ' => 'ی',
+        'ﻰ' => 'ی',
+        'ﻱ' => 'ی',
+        'ك' => 'ک',
+        'ﻙ' => 'ک',
+        'ﻚ' => 'ک',
+        'ة' => 'ه',
+        'ۀ' => 'ه',
+        'ﻩ' => 'ه',
+        'ﻪ' => 'ه',
+        'أ' => 'ا',
+        'إ' => 'ا',
+        'آ' => 'ا',
+        'ٱ' => 'ا',
+        'ٲ' => 'ا',
+        'ٳ' => 'ا',
+        'ؤ' => 'و',
+        'ئ' => 'ی',
+        '٠' => '0',
+        '١' => '1',
+        '٢' => '2',
+        '٣' => '3',
+        '٤' => '4',
+        '٥' => '5',
+        '٦' => '6',
+        '٧' => '7',
+        '٨' => '8',
+        '٩' => '9',
+        '۰' => '0',
+        '۱' => '1',
+        '۲' => '2',
+        '۳' => '3',
+        '۴' => '4',
+        '۵' => '5',
+        '۶' => '6',
+        '۷' => '7',
+        '۸' => '8',
+        '۹' => '9',
     ];
     $text = strtr($text, $map);
 
-    // 4. lowercase
     $text = mb_strtolower($text, 'UTF-8');
 
-    // 5. حذف همه فاصله‌ها و کاراکترهای کنترلی
     $text = preg_replace('/[\s\x{2000}-\x{200F}\x{2028}-\x{202F}\x{205F}\x{3000}]+/u', '', $text);
 
-    // 6. فروپاشی حروف تکراری (سس → س، ررر → ر)
-    //    این کار باعث می‌شه «بسسته» = «بسته» و «اررسال» = «ارسال»
     if ($text !== '') {
         $chars  = preg_split('//u', $text, -1, PREG_SPLIT_NO_EMPTY);
         $result = [];
@@ -286,9 +319,7 @@ function normalizePersianAggressive(string $text): string
 }
 
 // ============================================================
-// 🔍 تطابق فازی روی کلمات متن
-// - پنجره لغزان روی کلمات همسایه (برای عبارت‌های چندکلمه‌ای)
-// - مقایسه با Levenshtein یونیکد
+// 🔍 تطابق فازی
 // ============================================================
 function hasFuzzyMatch(array $words, string $normKeyword, string $originalKeyword): bool
 {
@@ -297,11 +328,9 @@ function hasFuzzyMatch(array $words, string $normKeyword, string $originalKeywor
         return false;
     }
 
-    // تعداد کلمه‌هایی که کلیدواژه به آن‌ها تقسیم می‌شود
     $kwWordCount = max(1, count(preg_split('/\s+/u', trim($originalKeyword), -1, PREG_SPLIT_NO_EMPTY)));
     $wordCount   = count($words);
 
-    // پنجره لغزان با اندازه‌های مختلف
     for ($windowSize = max(1, $kwWordCount - 1); $windowSize <= $kwWordCount + 1; $windowSize++) {
         for ($i = 0; $i + $windowSize <= $wordCount; $i++) {
             $chunk = array_slice($words, $i, $windowSize);
@@ -310,7 +339,6 @@ function hasFuzzyMatch(array $words, string $normKeyword, string $originalKeywor
 
             $chunkLen = mb_strlen($chunkJoined);
 
-            // اختلاف طول بیش از حد → رد کن
             if (abs($chunkLen - $kwLen) > max(FUZZY_MAX_DIST, 2)) {
                 continue;
             }
@@ -325,7 +353,7 @@ function hasFuzzyMatch(array $words, string $normKeyword, string $originalKeywor
 }
 
 // ============================================================
-// 🔤 فاصله Levenshtein یونیکد (فارسی)
+// 🔤 Levenshtein یونیکد
 // ============================================================
 function utf8Levenshtein(string $a, string $b): int
 {
@@ -416,7 +444,8 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
     do {
         if (time() - $startTime >= AI_MAX_RUNTIME) {
             Logger::warning('زمان AI تمام شد', 'AI runtime limit reached', [
-                'processed' => $nextIndex, 'total' => $total,
+                'processed' => $nextIndex,
+                'total' => $total,
             ]);
             break;
         }
@@ -439,7 +468,9 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
 
             if ($errno || $httpCode !== 200) {
                 Logger::warning('خطا در batch', 'AI batch failed', [
-                    'batch' => $batchIdx + 1, 'errno' => $errno, 'code' => $httpCode,
+                    'batch' => $batchIdx + 1,
+                    'errno' => $errno,
+                    'code' => $httpCode,
                 ]);
                 $results[$batchIdx] = ['matches' => []];
             } else {
@@ -472,7 +503,6 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
         }
 
         if (empty($active) && $nextIndex >= $total) break;
-
     } while ($running > 0 || !empty($active));
 
     foreach ($active as $ch) {
@@ -485,7 +515,7 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
 }
 
 // ============================================================
-// 📝 پرامپت — با تأکید شدید روی تایپی + معنایی
+// 📝 پرامپت
 // ============================================================
 function buildSystemPrompt(string $keywords): string
 {

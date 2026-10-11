@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 // ⚡ اولین خط: هر output بعدی رو بافر کن
@@ -84,12 +85,14 @@ try {
 
         $normalized[] = [
             'telegram_id' => (int) $row['id'],
-            'chat_id'     => isset($row['chat_id'])    ? (int)    $row['chat_id']    : null,
-            'sender_id'   => isset($row['sender_id'])  ? (int)    $row['sender_id']  : null,
-            'text'        => isset($row['text'])       ? (string) $row['text']       : null,
-            'link'        => isset($row['link'])       ? (string) $row['link']       : null,
-            'date'        => isset($row['date'])       ? (int)    $row['date']       : null,
-            'date_human'  => isset($row['date_human']) ? (string) $row['date_human'] : null,
+            'chat_id'     => isset($row['chat_id'])     ? (int)    $row['chat_id']     : null,
+            'group_name'  => isset($row['group_name'])  ? (string) $row['group_name']  : null,
+            'sender_id'   => isset($row['sender_id'])   ? (int)    $row['sender_id']   : null,
+            'sender_name' => isset($row['sender_name']) ? (string) $row['sender_name'] : null,
+            'text'        => isset($row['text'])        ? (string) $row['text']        : null,
+            'link'        => isset($row['link'])        ? (string) $row['link']        : null,
+            'date'        => isset($row['date'])        ? (int)    $row['date']        : null,
+            'date_human'  => isset($row['date_human'])  ? (string) $row['date_human']  : null,
             'created_at'  => $now,
         ];
     }
@@ -108,21 +111,26 @@ try {
         $config['paths']['failed']
     );
 
-    $file = $queue->push($normalized);
+    // ---- شکستن ردیف‌های زیاد به چند فایل صف ----
+    $chunks = array_chunk($normalized, $config['api']['max_rows_per_file'] ?? 1000);
+    $files  = [];
+
+    foreach ($chunks as $chunk) {
+        $files[] = $queue->push($chunk);
+    }
 
     Logger::info('درخواست با موفقیت در صف ذخیره شد', 'Request queued successfully', [
         'count'   => count($normalized),
         'skipped' => $skipped,
-        'file'    => $file,
+        'files'   => count($files),
     ]);
 
     echo json_encode([
         'ok'      => true,
         'queued'  => count($normalized),
         'skipped' => $skipped,
-        'file'    => $file,
+        'files'   => count($files),
     ], JSON_UNESCAPED_UNICODE);
-
 } catch (Throwable $e) {
     Logger::error('خطا در پردازش API', 'API processing error', [
         'message' => $e->getMessage(),

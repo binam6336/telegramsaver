@@ -1,9 +1,11 @@
 <?php
+
 declare(strict_types=1);
 
 final class Database
 {
-    private static ?PDO $pdo = null;
+    /** @var PDO|null */
+    private static $pdo = null;
 
     public static function connect(array $cfg): void
     {
@@ -13,7 +15,10 @@ final class Database
 
         $dsn = sprintf(
             'mysql:host=%s;port=%d;dbname=%s;charset=%s',
-            $cfg['host'], $cfg['port'], $cfg['name'], $cfg['charset']
+            $cfg['host'],
+            $cfg['port'],
+            $cfg['name'],
+            $cfg['charset']
         );
 
         self::$pdo = new PDO($dsn, $cfg['user'], $cfg['pass'], [
@@ -33,10 +38,12 @@ final class Database
         $values       = [];
 
         foreach ($rows as $r) {
-            $placeholders[] = '(?, ?, ?, ?, ?, ?, ?, ?)';
+            $placeholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
             $values[] = $r['telegram_id'];
             $values[] = $r['chat_id'];
+            $values[] = $r['group_name'];
             $values[] = $r['sender_id'];
+            $values[] = $r['sender_name'];
             $values[] = $r['text'];
             $values[] = $r['link'];
             $values[] = $r['date'];
@@ -45,7 +52,8 @@ final class Database
         }
 
         $sql = 'INSERT IGNORE INTO `messages`
-                (`telegram_id`, `chat_id`, `sender_id`, `text`, `link`, `date`, `date_human`, `created_at`)
+                (`telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
+                 `text`, `link`, `date`, `date_human`, `created_at`)
                 VALUES ' . implode(',', $placeholders);
 
         $stmt = self::$pdo->prepare($sql);

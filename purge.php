@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 ob_start();
@@ -24,7 +25,7 @@ try {
     $pdo  = $prop->getValue();
 
     // ============================================================
-    // 🔎 مرحله ۱: قبل از پاک‌سازی، یک بار فیلترگذاری انجام بده
+    // 🔎 مرحله ۱: قبل از پاک‌سازی، یک بار فیلترگذاری
     // ============================================================
     Logger::info(
         'شروع فیلترگذاری خودکار قبل از پاک‌سازی',
@@ -59,11 +60,13 @@ try {
 
     // ---- پاک کردن فایل‌های صف ----
     $queueFiles = 0;
-    foreach ([
-        $config['paths']['queue'],
-        $config['paths']['processing'],
-        $config['paths']['failed'],
-    ] as $dir) {
+    foreach (
+        [
+            $config['paths']['queue'],
+            $config['paths']['processing'],
+            $config['paths']['failed'],
+        ] as $dir
+    ) {
         $files = glob($dir . '/*.json') ?: [];
         foreach ($files as $f) {
             @unlink($f);
@@ -86,15 +89,14 @@ try {
     );
 
     echo json_encode([
-        'ok'          => true,
-        'filtered'    => $filterResult['total_new'],
+        'ok'               => true,
+        'filtered'         => $filterResult['total_new'],
         'filtered_details' => $filterResult['details'],
-        'deleted'     => $before - $after,
-        'before'      => $before,
-        'after'       => $after,
-        'queue_files' => $queueFiles,
+        'deleted'          => $before - $after,
+        'before'           => $before,
+        'after'            => $after,
+        'queue_files'      => $queueFiles,
     ], JSON_UNESCAPED_UNICODE);
-
 } catch (Throwable $e) {
     Logger::critical(
         'خطا در پاک‌سازی دیتابیس',
@@ -126,10 +128,10 @@ function runFilterBeforePurge(PDO $pdo): array
     }
 
     $insertSql = 'INSERT IGNORE INTO `filtered_messages`
-        (`message_id`, `telegram_id`, `chat_id`, `sender_id`, `text`, `link`,
-         `date`, `date_human`, `matched_keyword`, `original_created_at`)
-        SELECT `id`, `telegram_id`, `chat_id`, `sender_id`, `text`, `link`,
-               `date`, `date_human`, ?, `created_at`
+        (`message_id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
+         `text`, `link`, `date`, `date_human`, `matched_keyword`, `original_created_at`)
+        SELECT `id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
+               `text`, `link`, `date`, `date_human`, ?, `created_at`
         FROM `messages`
         WHERE `text` LIKE ? ESCAPE "\\\\"';
 
@@ -166,7 +168,6 @@ function runFilterBeforePurge(PDO $pdo): array
                 'Keyword filter done',
                 ['keyword' => $keyword, 'new' => $inserted]
             );
-
         } catch (Throwable $e) {
             Logger::error(
                 'خطا در فیلتر یک کلیدواژه',
