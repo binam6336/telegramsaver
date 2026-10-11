@@ -35,11 +35,11 @@ try {
     $where  = [];
     $params = [];
 
-    /* ⭐ NOT EXISTS — NULL-safe و سریع‌تر */
+    /* ⭐ زیرکوئری با مرجع صریح m.chat_id (نه chat_id تنها) */
     if ($COL_CHATID) {
         $where[] = "NOT EXISTS (
             SELECT 1 FROM `" . BLOCKED_TABLE . "` b
-            WHERE b.chat_id = `$COL_CHATID`
+            WHERE b.chat_id = m.`{$COL_CHATID}`
         )";
     }
 
@@ -47,7 +47,7 @@ try {
         $searchable = array_values(array_filter([$COL_TEXT, $COL_SENDER, $COL_GROUP]));
         if ($searchable) {
             $parts = [];
-            foreach ($searchable as $c) $parts[] = "`$c` LIKE :q";
+            foreach ($searchable as $c) $parts[] = "m.`$c` LIKE :q";
             $where[] = '(' . implode(' OR ', $parts) . ')';
             $params[':q'] = "%{$q}%";
         }
@@ -55,13 +55,16 @@ try {
 
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM `" . MSG_TABLE . "` {$whereSql}");
+    /* ⭐ FROM حالا alias m دارد */
+    $baseFrom = "FROM `" . MSG_TABLE . "` m";
+
+    $stmt = $pdo->prepare("SELECT COUNT(*) {$baseFrom} {$whereSql}");
     $stmt->execute($params);
     $total = (int)$stmt->fetchColumn();
 
-    $orderBy = $COL_ID ? "`$COL_ID` DESC" : '1';
+    $orderBy = $COL_ID ? "m.`$COL_ID` DESC" : '1';
     $stmt = $pdo->prepare(
-        "SELECT * FROM `" . MSG_TABLE . "` {$whereSql} ORDER BY {$orderBy} LIMIT {$perPage} OFFSET {$offset}"
+        "SELECT m.* {$baseFrom} {$whereSql} ORDER BY {$orderBy} LIMIT {$perPage} OFFSET {$offset}"
     );
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
