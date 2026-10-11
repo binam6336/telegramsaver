@@ -5,10 +5,11 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../db.php';
 
-const FM_TABLE     = 'filtered_messages';
-const MSG_TABLE    = 'messages';
-const VIEWED_TABLE = 'viewed_messages';
-const IRREL_TABLE  = 'irrelevant_messages';
+const FM_TABLE      = 'filtered_messages';
+const MSG_TABLE     = 'messages';
+const VIEWED_TABLE  = 'viewed_messages';
+const IRREL_TABLE   = 'irrelevant_messages';
+const BLOCKED_TABLE = 'blocked_chats';
 
 $action = $_GET['action'] ?? $_POST['action'] ?? 'list';
 
@@ -58,6 +59,9 @@ function handle_list(PDO $pdo): void
         $where[] = 'vm.id IS NULL AND im.id IS NULL';
     }
 
+    /* ⭐ حذف چت‌های مسدود */
+    $where[] = 'fm.chat_id NOT IN (SELECT chat_id FROM `' . BLOCKED_TABLE . '`)';
+
     if ($q !== '') {
         $where[] = '(fm.text LIKE :q
                      OR fm.matched_keyword LIKE :q
@@ -72,7 +76,6 @@ function handle_list(PDO $pdo): void
 
     $whereSql = 'WHERE ' . implode(' AND ', $where);
 
-    /* ⭐ JOIN اصلی: telegram_id + chat_id (قابل اعتمادترین) */
     $baseFrom = "FROM `" . FM_TABLE . "` fm
                  LEFT JOIN `" . MSG_TABLE . "` m
                         ON m.telegram_id = fm.telegram_id
@@ -80,12 +83,10 @@ function handle_list(PDO $pdo): void
                  LEFT JOIN `" . VIEWED_TABLE . "` vm ON vm.filtered_message_id = fm.id
                  LEFT JOIN `" . IRREL_TABLE  . "` im ON im.filtered_message_id = fm.id";
 
-    // ---- Count ----
     $stmt = $pdo->prepare("SELECT COUNT(*) {$baseFrom} {$whereSql}");
     $stmt->execute($params);
     $total = (int)$stmt->fetchColumn();
 
-    // ---- Data ----
     $stmt = $pdo->prepare(
         "SELECT fm.id, fm.message_id, fm.telegram_id, fm.chat_id,
                 fm.sender_id, fm.text, fm.link, fm.date_human,
@@ -101,15 +102,6 @@ function handle_list(PDO $pdo): void
     );
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
-
-    /* ⭐ حالت دیباگ: با ?debug=1 می‌توانید ببینید join چه چیزی برگردانده */
-    if (!empty($_GET['debug'])) {
-        json_ok([
-            'debug'    => true,
-            'sample'   => array_slice($rows, 0, 3),
-            'join_on'  => 'm.telegram_id = fm.telegram_id AND m.chat_id = fm.chat_id',
-        ]);
-    }
 
     $items = array_map(static function (array $r): array {
         return [
@@ -216,14 +208,23 @@ function get_counts(PDO $pdo): array
         "SELECT COUNT(*) FROM `" . FM_TABLE . "` fm
          LEFT JOIN `" . VIEWED_TABLE . "` vm ON vm.filtered_message_id = fm.id
          LEFT JOIN `" . IRREL_TABLE  . "` im ON im.filtered_message_id = fm.id
-         WHERE vm.id IS NULL AND im.id IS NULL"
+         WHERE vm.id IS NULL AND im.id IS NULL
+           AND fm.chat_id NOT IN (SELECT chat_id FROM `" . BLOCKED_TABLE . "`)"
     )->fetchColumn();
 
-    return [
-        'all'        => $all,
-        'viewed'     => (int)$pdo->query("SELECT COUNT(*) FROM `" . VIEWED_TABLE . "`")->fetchColumn(),
-        'irrelevant' => (int)$pdo->query("SELECT COUNT(*) FROM `" . IRREL_TABLE  . "`")->fetchColumn(),
-    ];
+    $viewed = (int)$pdo->query(
+        "SELECT COUNT(*) FROM `" . VIEWED_TABLE . "` vm
+         JOIN `" . FM_TABLE . "` fm ON fm.id = vm.filtered_message_id
+         WHERE fm.chat_id NOT IN (SELECT chat_id FROM `" . BLOCKED_TABLE . "`)"
+    )->fetchColumn();
+
+    $irrelevant = (int)$pdo->query(
+        "SELECT COUNT(*) FROM `" . IRREL_TABLE . "` im
+         JOIN `" . FM_TABLE . "` fm ON fm.id = im.filtered_message_id
+         WHERE fm.chat_id NOT IN (SELECT chat_id FROM `" . BLOCKED_TABLE . "`)"
+    )->fetchColumn();
+
+    return ['all' => $all, 'viewed' => $viewed, 'irrelevant' => $irrelevant];
 }
 
 function json_ok(array $data): void
