@@ -86,13 +86,10 @@ try {
             'last_id' => $lastProcessedId,
         ]);
     } else {
-        Logger::info('شروع از صفر', 'Starting from scratch', [
-            'prev_hash' => $state['keyword_hash'],
-            'new_hash'  => $keywordHash,
-        ]);
+        Logger::info('شروع از صفر', 'Starting from scratch');
     }
 
-    // 🔒 محافظت: اگه state از max id دیتابیس بزرگ‌تره، یعنی احتمالاً دیتابیس ریست شده
+    // 🔒 محافظت: اگه state از max id دیتابیس بزرگ‌تره، ریست کن
     $maxMessageId = (int) $pdo->query('SELECT COALESCE(MAX(id), 0) FROM `messages`')->fetchColumn();
     if ($lastProcessedId > $maxMessageId) {
         Logger::warning(
@@ -113,7 +110,22 @@ try {
     }
 
     // ============================================================
-    // ۴) پیام‌ها (فقط id > lastProcessedId)
+    // ۴) کش ترکیب‌های (telegram_id, matched_keyword) قبلاً فیلترشده
+    //    چون UNIQUE نداریم، این کش از تکراری جلوگیری می‌کنه
+    // ============================================================
+    $alreadyFiltered = [];
+    $chkStmt = $pdo->query('SELECT `telegram_id`, `matched_keyword` FROM `filtered_messages`');
+    while ($row = $chkStmt->fetch(PDO::FETCH_ASSOC)) {
+        $key = ((int) $row['telegram_id']) . '|' . $row['matched_keyword'];
+        $alreadyFiltered[$key] = true;
+    }
+
+    Logger::info('کش فیلترهای قبلی بارگذاری شد', 'Already-filtered cache loaded', [
+        'count' => count($alreadyFiltered),
+    ]);
+
+    // ============================================================
+    // ۵) پیام‌ها (فقط id > lastProcessedId)
     // ============================================================
     $stmt = $pdo->prepare(
         'SELECT `id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
@@ -140,10 +152,10 @@ try {
     ]);
 
     // ============================================================
-    // ۵) statement درج
+    // ۶) statement درج (بدون INSERT IGNORE — چون UNIQUE نداریم)
     // ============================================================
     $insertStmt = $pdo->prepare(
-        'INSERT IGNORE INTO `filtered_messages`
+        'INSERT INTO `filtered_messages`
         (`message_id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
          `text`, `link`, `date`, `date_human`, `matched_keyword`, `original_created_at`)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -155,7 +167,7 @@ try {
     }
 
     // ============================================================
-    // ۶) لایه ۱+۲: پیش‌فیلتر (نرمال‌سازی + فازی)
+    // ۷) لایه ۱+۲: پیش‌فیلتر (نرمال‌سازی + فازی)
     // ============================================================
     $totalNew        = 0;
     $preFilterHit    = [];
@@ -192,11 +204,19 @@ try {
         }
     }
 
-    // درج نتایج پیش‌فیلتر
+    // درج نتایج پیش‌فیلتر (با چک تکراری دستی)
     $preFilterCount = 0;
     foreach ($preFilterHit as $msgId => $kw) {
         $msg = $messagesById[$msgId] ?? null;
         if (!$msg) continue;
+
+        $tid = (int) ($msg['telegram_id'] ?? 0);
+        $key = $tid . '|' . $kw;
+
+        // 🔑 چک تکراری دستی
+        if (isset($alreadyFiltered[$key])) {
+            continue;
+        }
 
         $insertStmt->execute([
             $msg['id'],
@@ -212,7 +232,11 @@ try {
             $kw,
             $msg['created_at'],
         ]);
-        if ($insertStmt->rowCount() > 0) $preFilterCount++;
+
+        if ($insertStmt->rowCount() > 0) {
+            $preFilterCount++;
+            $alreadyFiltered[$key] = true;   // 📌 ثبت برای همین اجرا
+        }
     }
     $totalNew += $preFilterCount;
 
@@ -230,10 +254,10 @@ try {
     }
 
     // ============================================================
-    // ۷) لایه ۳: AI موازی — با ذخیره state بعد از هر batch
+    // ۸) لایه ۳: AI موازی — با ذخیره state بعد از هر batch
     // ============================================================
     $aiMatched = 0;
-    $lastSavedId = $lastProcessedId;   // ✅ مقدار اولیه درست
+    $lastSavedId = $lastProcessedId;
 
     if (!empty($remaining)) {
         $payloads = [];
@@ -255,7 +279,7 @@ try {
             'remaining'  => count($remaining),
         ]);
 
-        // callback: بعد از هر batch موفق، state رو با آخرین id این batch ذخیره کن
+        // callback: بعد از هر batch موفق، state رو ذخیره کن
         $onBatchDone = function (int $batchIdx) use ($batches, $keywordHash, &$lastSavedId) {
             $lastMsg = end($batches[$batchIdx]);
             $lastId  = (int) ($lastMsg['i'] ?? 0);
@@ -279,9 +303,18 @@ try {
                 $msgId = (int) ($row['i'] ?? 0);
                 if ($msgId <= 0 || !isset($messagesById[$msgId])) continue;
 
-                $aiMatched++;
                 $msg = $messagesById[$msgId];
                 $matchedWord = (string) ($row['w'] ?? 'AI-match');
+
+                $tid = (int) ($msg['telegram_id'] ?? 0);
+                $key = $tid . '|' . $matchedWord;
+
+                // 🔑 چک تکراری دستی
+                if (isset($alreadyFiltered[$key])) {
+                    continue;
+                }
+
+                $aiMatched++;
 
                 $insertStmt->execute([
                     $msg['id'],
@@ -297,11 +330,15 @@ try {
                     mb_substr($matchedWord, 0, 190),
                     $msg['created_at'],
                 ]);
-                if ($insertStmt->rowCount() > 0) $totalNew++;
+
+                if ($insertStmt->rowCount() > 0) {
+                    $totalNew++;
+                    $alreadyFiltered[$key] = true;   // 📌 ثبت برای همین اجرا
+                }
             }
         }
 
-        // ✅ state نهایی — با max id آخرین پیام پردازش‌شده توسط AI
+        // ✅ state نهایی AI
         if (!empty($payloads)) {
             $finalMaxId = (int) end($payloads)['i'];
             if ($finalMaxId > $lastSavedId) {
@@ -315,7 +352,7 @@ try {
     }
 
     // ============================================================
-    // ۸) آمار نهایی
+    // ۹) آمار نهایی
     // ============================================================
     $totalInTable = (int) $pdo->query('SELECT COUNT(*) FROM `filtered_messages`')->fetchColumn();
     $duration     = time() - $startTime;
@@ -347,19 +384,13 @@ function loadState(): array
         'keyword_hash'              => '',
     ];
 
-    if (!file_exists(STATE_FILE)) {
-        return $default;
-    }
+    if (!file_exists(STATE_FILE)) return $default;
 
     $json = @file_get_contents(STATE_FILE);
-    if ($json === false || $json === '') {
-        return $default;
-    }
+    if ($json === false || $json === '') return $default;
 
     $data = json_decode($json, true);
-    if (!is_array($data)) {
-        return $default;
-    }
+    if (!is_array($data)) return $default;
 
     return [
         'last_processed_message_id' => (int) ($data['last_processed_message_id'] ?? 0),
@@ -388,17 +419,14 @@ function saveState(int $lastId, string $keywordHash): void
 // ============================================================
 function normalizePersianAggressive(string $text): string
 {
-    // 1. ZWNJ، BOM، کاراکترهای نامرئی
     $text = str_replace(
         ["\xE2\x80\x8C", "\xE2\x80\x8B", "\xEF\xBB\xBF", "\xE2\x80\x8D", "\xE2\x80\x8E", "\xE2\x80\x8F"],
         '',
         $text
     );
 
-    // 2. اعراب
     $text = preg_replace('/[\x{064B}-\x{065F}\x{0670}\x{06D6}-\x{06ED}]/u', '', $text);
 
-    // 3. یکسان‌سازی حروف عربی/فارسی
     $map = [
         'ي' => 'ی',
         'ى' => 'ی',
@@ -443,13 +471,10 @@ function normalizePersianAggressive(string $text): string
     ];
     $text = strtr($text, $map);
 
-    // 4. lowercase
     $text = mb_strtolower($text, 'UTF-8');
 
-    // 5. حذف فاصله‌ها و کاراکترهای کنترلی
     $text = preg_replace('/[\s\x{2000}-\x{200F}\x{2028}-\x{202F}\x{205F}\x{3000}]+/u', '', $text);
 
-    // 6. فروپاشی حروف تکراری (سس → س)
     if ($text !== '') {
         $chars  = preg_split('//u', $text, -1, PREG_SPLIT_NO_EMPTY);
         $result = [];
@@ -472,9 +497,7 @@ function normalizePersianAggressive(string $text): string
 function hasFuzzyMatch(array $words, string $normKeyword, string $originalKeyword): bool
 {
     $kwLen = mb_strlen($normKeyword);
-    if ($kwLen < FUZZY_MIN_WORD) {
-        return false;
-    }
+    if ($kwLen < FUZZY_MIN_WORD) return false;
 
     $kwWordCount = max(1, count(preg_split('/\s+/u', trim($originalKeyword), -1, PREG_SPLIT_NO_EMPTY)));
     $wordCount   = count($words);
@@ -487,13 +510,9 @@ function hasFuzzyMatch(array $words, string $normKeyword, string $originalKeywor
 
             $chunkLen = mb_strlen($chunkJoined);
 
-            if (abs($chunkLen - $kwLen) > max(FUZZY_MAX_DIST, 2)) {
-                continue;
-            }
+            if (abs($chunkLen - $kwLen) > max(FUZZY_MAX_DIST, 2)) continue;
 
-            if (utf8Levenshtein($normKeyword, $chunkJoined) <= FUZZY_MAX_DIST) {
-                return true;
-            }
+            if (utf8Levenshtein($normKeyword, $chunkJoined) <= FUZZY_MAX_DIST) return true;
         }
     }
 
@@ -531,7 +550,7 @@ function utf8Levenshtein(string $a, string $b): int
 }
 
 // ============================================================
-// 🚀 ارسال موازی به AI با callback
+// 🚀 ارسال موازی به AI
 // ============================================================
 function sendBatchesInParallel(array $batches, array $keywords, int $startTime, ?callable $onBatchDone = null): array
 {
@@ -651,7 +670,6 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime, 
                 }
             }
 
-            // 📌 ذخیره state فقط در صورت موفقیت
             if ($success && $onBatchDone !== null && $batchIdx >= 0) {
                 try {
                     $onBatchDone($batchIdx);

@@ -9,9 +9,7 @@ final class Database
 
     public static function connect(array $cfg): void
     {
-        if (self::$pdo !== null) {
-            return;
-        }
+        if (self::$pdo !== null) return;
 
         $dsn = sprintf(
             'mysql:host=%s;port=%d;dbname=%s;charset=%s',
@@ -29,30 +27,53 @@ final class Database
     }
 
     /**
-     * درج انبوه پیام‌ها با محافظت در برابر تکراری
-     *
-     * - UNIQUE روی (chat_id, telegram_id) باید توی دیتابیس وجود داشته باشه
-     * - اگه پیام تکراری بیاد، فیلدهای متنی و metadata به‌روز می‌شن
-     * - chat_id و telegram_id هرگز NULL نیستن
+     * درج انبوه با چک دستی تکراری (بدون اتکا به UNIQUE)
      */
     public static function insertMessages(array $rows): int
     {
-        if (empty($rows)) {
+        if (empty($rows)) return 0;
+
+        // ---- ۱) گرفتن همه telegram_id های ورودی ----
+        $telegramIds = [];
+        foreach ($rows as $r) {
+            $tid = (int) ($r['telegram_id'] ?? 0);
+            if ($tid > 0) $telegramIds[] = $tid;
+        }
+
+        if (empty($telegramIds)) return 0;
+
+        // ---- ۲) پیدا کردن telegram_id هایی که از قبل تو دیتابیس هستن ----
+        $placeholders = implode(',', array_fill(0, count($telegramIds), '?'));
+        $checkStmt = self::$pdo->prepare(
+            "SELECT `telegram_id` FROM `messages` WHERE `telegram_id` IN ($placeholders)"
+        );
+        $checkStmt->execute($telegramIds);
+        $existingIds = $checkStmt->fetchAll(PDO::FETCH_COLUMN);
+
+        // تبدیل به set برای جستجوی سریع
+        $existingSet = array_flip(array_map('intval', $existingIds));
+
+        // ---- ۳) فقط ردیف‌های جدید رو نگه دار ----
+        $newRows = [];
+        foreach ($rows as $r) {
+            $tid = (int) ($r['telegram_id'] ?? 0);
+            if ($tid > 0 && !isset($existingSet[$tid])) {
+                $newRows[] = $r;
+            }
+        }
+
+        if (empty($newRows)) {
             return 0;
         }
 
+        // ---- ۴) درج فقط ردیف‌های جدید ----
         $placeholders = [];
         $values       = [];
 
-        foreach ($rows as $r) {
-            // 🔒 اجبار به عدد (نه NULL) برای chat_id و telegram_id
-            //    چون در MySQL، UNIQUE KEY روی NULL کار نمی‌کنه
-            $telegramId = isset($r['telegram_id']) ? (int) $r['telegram_id'] : 0;
-            $chatId     = isset($r['chat_id'])     ? (int) $r['chat_id']     : 0;
-
+        foreach ($newRows as $r) {
             $placeholders[] = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
-            $values[] = $telegramId;
-            $values[] = $chatId;
+            $values[] = (int) ($r['telegram_id'] ?? 0);
+            $values[] = (int) ($r['chat_id']     ?? 0);
             $values[] = $r['group_name']  ?? null;
             $values[] = isset($r['sender_id']) ? (int) $r['sender_id'] : null;
             $values[] = $r['sender_name'] ?? null;
@@ -63,20 +84,10 @@ final class Database
             $values[] = $r['created_at']  ?? date('Y-m-d H:i:s');
         }
 
-        // استفاده از ON DUPLICATE KEY UPDATE به جای IGNORE
-        // → اگه پیام تکراری اومد، اطلاعات به‌روز می‌شن (نه اینکه نادیده گرفته بشه)
-        // → created_at دست نمی‌خوره (زمان اولین مشاهده حفظ می‌شه)
         $sql = 'INSERT INTO `messages`
                 (`telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
                  `text`, `link`, `date`, `date_human`, `created_at`)
-                VALUES ' . implode(',', $placeholders) . '
-                ON DUPLICATE KEY UPDATE
-                    `group_name`  = VALUES(`group_name`),
-                    `sender_name` = VALUES(`sender_name`),
-                    `text`        = VALUES(`text`),
-                    `link`        = VALUES(`link`),
-                    `date`        = VALUES(`date`),
-                    `date_human`  = VALUES(`date_human`)';
+                VALUES ' . implode(',', $placeholders);
 
         $stmt = self::$pdo->prepare($sql);
         $stmt->execute($values);
