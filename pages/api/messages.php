@@ -5,7 +5,7 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../db.php';
 
-/** نام جدول پیام‌ها — اگر متفاوت است اینجا تغییر دهید */
+/** نام جدول پیام‌ها */
 const MSG_TABLE = 'messages';
 
 try {
@@ -22,8 +22,9 @@ try {
 
     $COL_ID     = $pick(['id', 'message_id']);
     $COL_TEXT   = $pick(['text', 'message', 'content', 'body', 'caption']);
-    $COL_SENDER = $pick(['sender_name', 'sender', 'from_name', 'username', 'chat_title', 'first_name']);
-    $COL_DATE   = $pick(['created_at', 'date', 'sent_at', 'inserted_at', 'timestamp']);
+    $COL_SENDER = $pick(['sender_name', 'sender', 'from_name', 'username', 'first_name']);
+    $COL_GROUP  = $pick(['group_name', 'chat_title', 'group', 'chat_name']);
+    $COL_DATE   = $pick(['date_human', 'created_at', 'date', 'sent_at', 'inserted_at']);
     $COL_LINK   = $pick(['link', 'url', 'message_link', 'source_url', 'original_url', 'tg_link']);
 
     // ----- ورودی‌ها -----
@@ -37,7 +38,7 @@ try {
     $params = [];
 
     if ($q !== '') {
-        $searchable = array_filter([$COL_TEXT, $COL_SENDER]);
+        $searchable = array_values(array_filter([$COL_TEXT, $COL_SENDER, $COL_GROUP]));
         if ($searchable) {
             $parts = [];
             foreach ($searchable as $c) $parts[] = "`$c` LIKE :q";
@@ -60,7 +61,7 @@ try {
     $rows = $stmt->fetchAll();
 
     // ----- نرمال‌سازی خروجی -----
-    $items = array_map(function (array $r) use ($COL_ID, $COL_TEXT, $COL_SENDER, $COL_DATE, $COL_LINK) {
+    $items = array_map(function (array $r) use ($COL_ID, $COL_TEXT, $COL_SENDER, $COL_GROUP, $COL_DATE, $COL_LINK) {
 
         $text = $COL_TEXT ? (string)($r[$COL_TEXT] ?? '') : '';
         $link = null;
@@ -72,11 +73,12 @@ try {
         }
 
         return [
-            'id'     => $COL_ID     ? ($r[$COL_ID]     ?? null) : null,
-            'sender' => $COL_SENDER ? ($r[$COL_SENDER] ?? '')   : '',
-            'text'   => $text,
-            'date'   => $COL_DATE   ? ($r[$COL_DATE]   ?? '')   : '',
-            'link'   => $link,
+            'id'          => $COL_ID     ? ($r[$COL_ID]     ?? null) : null,
+            'sender_name' => $COL_SENDER ? ($r[$COL_SENDER] ?? '')   : '',
+            'group_name'  => $COL_GROUP  ? ($r[$COL_GROUP]  ?? '')   : '',
+            'text'        => $text,
+            'date'        => $COL_DATE   ? ($r[$COL_DATE]   ?? '')   : '',
+            'link'        => $link,
         ];
     }, $rows);
 

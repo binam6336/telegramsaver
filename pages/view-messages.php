@@ -7,7 +7,7 @@
         </button>
         <div class="search-box">
             <i class="fas fa-search"></i>
-            <input type="text" id="searchInput" placeholder="جستجو در متن یا فرستنده...">
+            <input type="text" id="searchInput" placeholder="جستجو در متن، فرستنده یا گروه...">
         </div>
     </div>
 </div>
@@ -16,16 +16,17 @@
     <table class="data-table">
         <thead>
             <tr>
-                <th style="width:70px">#</th>
-                <th style="width:180px">فرستنده</th>
+                <th style="width:60px">#</th>
+                <th style="width:150px">گروه</th>
+                <th style="width:150px">فرستنده</th>
                 <th>متن پیام</th>
-                <th style="width:170px">تاریخ</th>
-                <th style="width:130px">عملیات</th>
+                <th style="width:150px">تاریخ</th>
+                <th style="width:110px">عملیات</th>
             </tr>
         </thead>
         <tbody id="messagesBody">
             <tr>
-                <td colspan="5" class="loading">در حال بارگذاری...</td>
+                <td colspan="6" class="loading">در حال بارگذاری...</td>
             </tr>
         </tbody>
     </table>
@@ -34,7 +35,6 @@
 <div class="pagination" id="pagination"></div>
 
 <style>
-    /* ---------- Refresh button ---------- */
     .btn-refresh {
         display: inline-flex;
         align-items: center;
@@ -80,7 +80,6 @@
         }
     }
 
-    /* ---------- Toast ---------- */
     .toast {
         position: fixed;
         bottom: 24px;
@@ -112,6 +111,26 @@
     .toast.error {
         background: #dc2626
     }
+
+    .badge-group {
+        display: inline-block;
+        padding: 3px 9px;
+        background: #f0f9ff;
+        color: #0369a1;
+        border-radius: 6px;
+        font-size: .75rem;
+        font-weight: 700
+    }
+
+    .badge-sender {
+        display: inline-block;
+        padding: 3px 9px;
+        background: #f5f3ff;
+        color: #6d28d9;
+        border-radius: 6px;
+        font-size: .75rem;
+        font-weight: 700
+    }
 </style>
 
 <div class="toast" id="toast"></div>
@@ -127,7 +146,7 @@
         const refreshLbl = document.getElementById('refreshLabel');
 
         const ENDPOINT = 'api/messages.php';
-        const REFRESH_EP = 'api/refresh.php?job=worker'; // ⭐ فقط worker
+        const REFRESH_EP = 'api/refresh.php?job=worker';
 
         let currentQuery = '';
         let searchTimer = null;
@@ -156,7 +175,7 @@
         /* ---------- render ---------- */
         function render(items) {
             if (!items.length) {
-                tbody.innerHTML = '<tr><td colspan="5" class="empty">پیامی یافت نشد</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="empty">پیامی یافت نشد</td></tr>';
                 return;
             }
             tbody.innerHTML = items.map(m => {
@@ -168,10 +187,19 @@
                        <i class="fas fa-eye-slash"></i> مشاهده
                    </span>`;
 
+                const groupCell = m.group_name ?
+                    `<span class="badge-group">${escapeHtml(m.group_name)}</span>` :
+                    '<span style="color:#94a3b8">-</span>';
+
+                const senderCell = m.sender_name ?
+                    `<span class="badge-sender">${escapeHtml(m.sender_name)}</span>` :
+                    '<span style="color:#94a3b8">-</span>';
+
                 return `<tr>
                 <td>${m.id ?? '-'}</td>
-                <td>${escapeHtml(m.sender || '-')}</td>
-                <td class="cell-text" title="${escapeHtml(m.text)}">${escapeHtml(truncate(m.text, 90)) || '-'}</td>
+                <td>${groupCell}</td>
+                <td>${senderCell}</td>
+                <td class="cell-text" title="${escapeHtml(m.text)}">${escapeHtml(truncate(m.text, 80)) || '-'}</td>
                 <td>${escapeHtml(m.date || '-')}</td>
                 <td>${btn}</td>
             </tr>`;
@@ -199,9 +227,8 @@
             pagin.innerHTML = html;
         }
 
-        /* ---------- load ---------- */
         function load(page = 1) {
-            tbody.innerHTML = '<tr><td colspan="5" class="loading">در حال بارگذاری...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" class="loading">در حال بارگذاری...</td></tr>';
 
             const url = new URL(ENDPOINT, location.href);
             url.searchParams.set('page', page);
@@ -219,11 +246,10 @@
                     renderPagination(data.page, data.pages);
                 })
                 .catch(err => {
-                    tbody.innerHTML = `<tr><td colspan="5" class="error">خطا: ${escapeHtml(err.message)}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="6" class="error">خطا: ${escapeHtml(err.message)}</td></tr>`;
                 });
         }
 
-        /* ---------- refresh (فقط worker) ---------- */
         function refreshMessages() {
             refreshBtn.disabled = true;
             refreshIco.classList.add('is-spinning');
@@ -256,7 +282,6 @@
 
         refreshBtn.addEventListener('click', refreshMessages);
 
-        /* ---------- events ---------- */
         pagin.addEventListener('click', e => {
             const btn = e.target.closest('.page-btn');
             if (btn) load(parseInt(btn.dataset.page, 10));
@@ -270,7 +295,6 @@
             }, 350);
         });
 
-        /* ---------- init ---------- */
         load(1);
     })();
 </script>

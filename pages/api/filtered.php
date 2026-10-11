@@ -6,6 +6,7 @@ header('Content-Type: application/json; charset=utf-8');
 require __DIR__ . '/../db.php';
 
 const FM_TABLE     = 'filtered_messages';
+const MSG_TABLE    = 'messages';
 const VIEWED_TABLE = 'viewed_messages';
 const IRREL_TABLE  = 'irrelevant_messages';
 
@@ -51,18 +52,15 @@ function handle_list(PDO $pdo): void
 
     // ---- فیلتر بر اساس تب ----
     if ($tab === 'viewed') {
-        // فقط مشاهده‌شده‌ها
         $where[] = 'vm.id IS NOT NULL';
     } elseif ($tab === 'irrelevant') {
-        // فقط غیرمرتبط‌ها
         $where[] = 'im.id IS NOT NULL';
     } else {
-        // تب «همه» → نه مشاهده‌شده و نه غیرمرتبط
         $where[] = 'vm.id IS NULL AND im.id IS NULL';
     }
 
     if ($q !== '') {
-        $where[] = '(fm.text LIKE :q OR fm.matched_keyword LIKE :q OR fm.sender_id LIKE :q)';
+        $where[] = '(fm.text LIKE :q OR fm.matched_keyword LIKE :q OR m.sender_name LIKE :q OR m.group_name LIKE :q)';
         $params[':q'] = "%{$q}%";
     }
     if ($keyword !== '') {
@@ -70,9 +68,11 @@ function handle_list(PDO $pdo): void
         $params[':kw'] = $keyword;
     }
 
-    $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+    $whereSql = 'WHERE ' . implode(' AND ', $where);
 
+    /* ⭐ JOIN با messages برای گرفتن group_name و sender_name */
     $baseFrom = "FROM `" . FM_TABLE . "` fm
+                 LEFT JOIN `" . MSG_TABLE . "` m ON m.id = fm.message_id
                  LEFT JOIN `" . VIEWED_TABLE . "` vm ON vm.filtered_message_id = fm.id
                  LEFT JOIN `" . IRREL_TABLE  . "` im ON im.filtered_message_id = fm.id";
 
@@ -85,6 +85,8 @@ function handle_list(PDO $pdo): void
     $stmt = $pdo->prepare(
         "SELECT fm.id, fm.message_id, fm.sender_id, fm.text, fm.link,
                 fm.date_human, fm.matched_keyword, fm.click_count,
+                m.sender_name AS sender_name,
+                m.group_name  AS group_name,
                 vm.id AS viewed_id, vm.viewed_at,
                 im.id AS irrelevant_id, im.marked_at
          {$baseFrom}
@@ -100,6 +102,8 @@ function handle_list(PDO $pdo): void
             'id'              => (int)$r['id'],
             'message_id'      => $r['message_id'],
             'sender_id'       => $r['sender_id'],
+            'sender_name'     => $r['sender_name'] ?? '',
+            'group_name'      => $r['group_name']  ?? '',
             'text'            => $r['text'],
             'link'            => $r['link'],
             'date_human'      => $r['date_human'],
