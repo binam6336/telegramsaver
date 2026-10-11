@@ -357,25 +357,24 @@ project/
 
 ## ۷. دیتابیس
 
+
 ### 7.1 جدول `messages`
 
-```sql
-CREATE TABLE `messages` (
-  `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `telegram_id`  BIGINT NULL,
-  `chat_id`      BIGINT NULL,
-  `sender_id`    BIGINT NULL,
-  `text`         TEXT NULL,
-  `link`         VARCHAR(512) NULL,
-  `date`         BIGINT NULL,
-  `date_human`   VARCHAR(32) NULL,
-  `created_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uniq_telegram_id` (`telegram_id`),  -- ⚠️ حیاتی
-  KEY `idx_chat_id` (`chat_id`),
-  KEY `idx_chat_date` (`chat_id`, `date`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-```
+| ستون | نوع | توضیح |
+|------|-----|-------|
+| `id` | BIGINT UNSIGNED | PK |
+| `telegram_id` | BIGINT | شناسه پیام در تلگرام (UNIQUE) |
+| `chat_id` | BIGINT | شناسه چت |
+| `group_name` | VARCHAR(190) | نام گروه (جدید) |
+| `sender_id` | BIGINT | شناسه فرستنده |
+| `sender_name` | VARCHAR(190) | نام فرستنده (جدید) |
+| `text` | TEXT | متن پیام |
+| `link` | VARCHAR(512) | لینک پیام |
+| `date` | BIGINT | timestamp |
+| `date_human` | VARCHAR(32) | تاریخ خوانا |
+| `created_at` | DATETIME | زمان درج |
+
+
 
 ### 7.2 جدول `filters`
 
