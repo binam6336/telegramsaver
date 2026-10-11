@@ -7,7 +7,7 @@ ob_start();
 
 require __DIR__ . '/bootstrap.php';
 
-// 🧹 هر چیزی که تا اینجا چاپ شده (BOM، فاصله، خط اضافه) رو پاک کن
+// 🧹 هر چیزی که تا اینجا چاپ شده رو پاک کن
 if (ob_get_length() > 0) {
     $junk = ob_get_clean();
     Logger::warning(
@@ -78,14 +78,24 @@ try {
             $skipped++;
             Logger::warning('رکورد نامعتبر در ورودی', 'Invalid row in payload', [
                 'index' => $i,
-                'row'   => $row,
+                'reason' => 'missing id',
+            ]);
+            continue;
+        }
+
+        // 🔒 chat_id اجباریه — بدون اون نمی‌شه تکراری‌ها رو تشخیص داد
+        if (!isset($row['chat_id']) || $row['chat_id'] === null || $row['chat_id'] === '') {
+            $skipped++;
+            Logger::warning('رکورد بدون chat_id رد شد', 'Row without chat_id skipped', [
+                'index' => $i,
+                'id'    => $row['id'],
             ]);
             continue;
         }
 
         $normalized[] = [
             'telegram_id' => (int) $row['id'],
-            'chat_id'     => isset($row['chat_id'])     ? (int)    $row['chat_id']     : null,
+            'chat_id'     => (int) $row['chat_id'],
             'group_name'  => isset($row['group_name'])  ? (string) $row['group_name']  : null,
             'sender_id'   => isset($row['sender_id'])   ? (int)    $row['sender_id']   : null,
             'sender_name' => isset($row['sender_name']) ? (string) $row['sender_name'] : null,
