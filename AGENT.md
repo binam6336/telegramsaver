@@ -1234,3 +1234,342 @@ HAVING c > 1;
 4. ذخیره کن
 
 این بلاک رو به‌عنوان UPDATE در انتهای AGENT.md بذار تا هر کسی که از نسخه قدیمی میاد، بدونه چی تغییر کرده. اگه خواستی بخش خاصی رو بازتر کنم بگو 🚀ب
+```markdown
+---
+
+# 🔄 UPDATE — نسخه 1.2 (2026-10-11)
+
+این بخش، تغییرات بعد از نسخه ۱.۱ رو توضیح می‌ده. **مهم‌ترین تغییر:** یونیک بودن از دیتابیس به کد منتقل شد.
+
+---
+
+## U1. حذف تمام UNIQUE KEY ها از دیتابیس 🔴 مهم
+
+### علت تغییر
+
+UNIQUE KEY ها در دیتابیس باعث مشکلات زیر شده بودن:
+
+| مشکل | توضیح |
+|------|-------|
+| **پیام‌های از دست رفته** | وقتی `telegram_id` تکراری می‌آمد، با `INSERT IGNORE` کاملاً نادیده گرفته می‌شد — حتی اگه متن جدید بود |
+| **پیچیدگی در purge** | بعد از `purge.php`، `AUTO_INCREMENT` صفر می‌شد ولی state file دست‌نخورده می‌موند |
+| **عدم انعطاف** | نمی‌شد منطق پیچیده‌تر (مثل ترکیب چند فیلد) رو اعمال کرد |
+
+### SQL اجرا شده
+
+```sql
+-- حذف UNIQUE ها از همه جداول
+ALTER TABLE `messages`            DROP INDEX `uniq_telegram_id`;
+ALTER TABLE `filtered_messages`   DROP INDEX `uniq_msg_keyword`;
+ALTER TABLE `filtered_messages`   DROP INDEX `uniq_telegram_keyword`;
+ALTER TABLE `filters`             DROP INDEX `uniq_keyword`;
+ALTER TABLE `blocked_chats`       DROP INDEX `uniq_chat_id`;
+ALTER TABLE `irrelevant_messages` DROP INDEX `uniq_filtered`;
+ALTER TABLE `viewed_messages`     DROP INDEX `uniq_filtered`;
+```
+
+### نتیجه
+
+- ❌ **دیگه هیچ UNIQUE KEY ای در دیتابیس نیست** (فقط PRIMARY)
+- ✅ **یونیک بودن الان در کد PHP چک می‌شه**
+- ✅ **ایندکس‌های معمولی (`NON_UNIQUE = 1`) برای سرعت باقی موندن**
+
+---
+
+## U2. یونیک بودن در کد PHP ✅
+
+### `src/Database.php` — یونیک بر اساس `telegram_id`
+
+قبل از هر INSERT، کد این مراحل رو انجام می‌ده:
+
+```php
+// ۱) گرفتن همه telegram_id های ورودی
+$telegramIds = [];
+foreach ($rows as $r) {
+    $tid = (int) ($r['telegram_id'] ?? 0);
+    if ($tid > 0) $telegramIds[] = $tid;
+}
+
+// ۲) کوئری: کدوم‌ها از قبل تو دیتابیس هستن؟
+$checkStmt = self::$pdo->prepare(
+    "SELECT `telegram_id` FROM `messages` WHERE `telegram_id` IN ($placeholders)"
+);
+$checkStmt->execute($telegramIds);
+$existingSet = array_flip(array_map('intval', $checkStmt->fetchAll(PDO::FETCH_COLUMN)));
+
+// ۳) فقط ردیف‌های جدید رو درج کن
+$newRows = [];
+foreach ($rows as $r) {
+    $tid = (int) ($r['telegram_id'] ?? 0);
+    if ($tid > 0 && !isset($existingSet[$tid])) {
+        $newRows[] = $r;
+    }
+}
+
+// ۴) INSERT معمولی (بدون ON DUPLICATE KEY UPDATE)
+$sql = 'INSERT INTO `messages` (...) VALUES ...';
+```
+
+**یونیک:** `telegram_id` (فقط یک ستون)
+**محل:** کد PHP
+
+---
+
+### `filter.php` — یونیک بر اساس `(telegram_id, matched_keyword)`
+
+قبل از شروع پردازش، تمام ترکیب‌های قبلاً فیلترشده از دیتابیس لود می‌شن:
+
+```php
+// کش ترکیب‌های قبلی
+$alreadyFiltered = [];
+$chkStmt = $pdo->query('SELECT `telegram_id`, `matched_keyword` FROM `filtered_messages`');
+while ($row = $chkStmt->fetch(PDO::FETCH_ASSOC)) {
+    $key = ((int) $row['telegram_id']) . '|' . $row['matched_keyword'];
+    $alreadyFiltered[$key] = true;
+}
+```
+
+قبل از هر INSERT:
+
+```php
+$key = $tid . '|' . $kw;
+if (isset($alreadyFiltered[$key])) {
+    continue;   // skip
+}
+$insertStmt->execute([...]);
+if ($insertStmt->rowCount() > 0) {
+    $alreadyFiltered[$key] = true;   // ثبت برای همین اجرا
+}
+```
+
+**یونیک:** ترکیب `(telegram_id, matched_keyword)`
+**محل:** کد PHP
+
+---
+
+### `purge.php` — همان منطق `filter.php`
+
+تابع `runFilterBeforePurge` هم باید با چک دستی کار کنه:
+
+```php
+function runFilterBeforePurge(PDO $pdo): array
+{
+    // کش ترکیب‌های قبلی
+    $alreadyFiltered = [];
+    $chkStmt = $pdo->query('SELECT `telegram_id`, `matched_keyword` FROM `filtered_messages`');
+    while ($row = $chkStmt->fetch(PDO::FETCH_ASSOC)) {
+        $alreadyFiltered[((int) $row['telegram_id']) . '|' . $row['matched_keyword']] = true;
+    }
+
+    // برای هر پیام منطبق، چک تکراری قبل از INSERT
+    foreach ($matched as $msg) {
+        $key = ((int) $msg['telegram_id']) . '|' . $keyword;
+        if (isset($alreadyFiltered[$key])) continue;
+        $insertStmt->execute([...]);
+        if ($insertStmt->rowCount() > 0) {
+            $alreadyFiltered[$key] = true;
+        }
+    }
+}
+```
+
+---
+
+## U3. اصلاح باگ State در `filter.php` 🐛
+
+### باگ ۱: مقدار اولیه اشتباه `$lastSavedId`
+
+```php
+// ❌ قبل:
+$lastSavedId = $lastPreFilterId;   // آخرین id این اجرا
+// در نتیجه: شرط if ($lastId > $lastSavedId) هیچ‌وقت true نمی‌شد
+
+// ✅ بعد:
+$lastSavedId = $lastProcessedId;   // آخرین id قبل از شروع
+```
+
+### باگ ۲: State ذخیره‌شده بعد از purge
+
+بعد از `purge.php`، `messages` خالی می‌شد و `AUTO_INCREMENT` صفر می‌شد. ولی state file همچنان `last_processed_message_id` قدیمی (مثلاً 1709) رو داشت. نتیجه: `SELECT ... WHERE id > 1709` هیچ پیامی برنمی‌گردوند.
+
+### راه‌حل: محافظت خودکار
+
+```php
+$maxMessageId = (int) $pdo->query('SELECT COALESCE(MAX(id), 0) FROM `messages`')->fetchColumn();
+if ($lastProcessedId > $maxMessageId) {
+    Logger::warning('state بزرگ‌تر از max id دیتابیس است، ریست می‌شود', ...);
+    $lastProcessedId = 0;
+    $resumeMode = false;
+}
+```
+
+### باگ ۳: ذخیره state نهایی AI
+
+بعد از همه batch ها، state با `max id` آخرین پیام پردازش‌شده ذخیره می‌شه:
+
+```php
+if (!empty($payloads)) {
+    $finalMaxId = (int) end($payloads)['i'];
+    if ($finalMaxId > $lastSavedId) {
+        $lastSavedId = $finalMaxId;
+        saveState($lastSavedId, $keywordHash);
+    }
+}
+```
+
+---
+
+## U4. جدول خلاصه یونیک بودن
+
+| فایل | جدول هدف | یونیک بر اساس | محل چک |
+|------|---------|--------------|--------|
+| `src/Database.php` | `messages` | `telegram_id` | **کد PHP** |
+| `filter.php` | `filtered_messages` | `(telegram_id, matched_keyword)` | **کد PHP** |
+| `purge.php` | `filtered_messages` | `(telegram_id, matched_keyword)` | **کد PHP** |
+
+> ⚠️ **دیگه هیچ UNIQUE KEY ای در دیتابیس نیست.** تمام یونیک بودن در PHP چک می‌شه.
+
+---
+
+## U5. پیامدها و نکات مهم
+
+### ✅ مزایا
+
+- **کنترل کامل** — می‌تونی منطق یونیک رو هر وقت خواستی عوض کنی
+- **پیام‌های جدید نمی‌آن نادیده گرفته بشن** — چون INSERT IGNORE حذف شد
+- **انعطاف** — می‌شه ترکیب‌های جدید (مثل `(chat_id, telegram_id)`) رو راحت اضافه کرد
+
+### ⚠️ معایب
+
+- **کندتر** — قبل از هر INSERT، یه SELECT لازمه
+- **بار کد بیشتر** — منطق تکراری توی ۳ فایل تکرار شده
+- **ریسک race condition** — اگه دو ورکر همزمان اجرا شن، ممکنه هر دو یه پیام رو درج کنن (ولی `flock` ورکر رو قفل می‌کنه، پس در عمل مشکلی نیست)
+
+### 🔒 نکته امنیتی
+
+- **`worker.php`** — با `flock` قفل می‌شه، پس race condition نداره
+- **`filter.php`** — اگه همزمان دو بار صدا زده بشه، ممکنه تکراری درست بشه. برای جلوگیری، می‌تونی یه `flock` هم روی `filter.php` بذاری
+
+---
+
+## U6. کوئری‌های مفید
+
+### چک تکراری‌ها
+
+```sql
+-- messages
+SELECT telegram_id, COUNT(*) c
+FROM messages
+GROUP BY telegram_id
+HAVING c > 1;
+
+-- filtered_messages
+SELECT telegram_id, matched_keyword, COUNT(*) c
+FROM filtered_messages
+GROUP BY telegram_id, matched_keyword
+HAVING c > 1;
+```
+
+### پاک کردن تکراری‌ها
+
+```sql
+-- messages (نگه‌داشتن قدیمی‌ترین)
+DELETE m1 FROM `messages` m1
+INNER JOIN `messages` m2
+   ON m1.`telegram_id` = m2.`telegram_id`
+  AND m1.`id` > m2.`id`;
+
+-- filtered_messages
+DELETE f1 FROM `filtered_messages` f1
+INNER JOIN `filtered_messages` f2
+   ON f1.`telegram_id`      = f2.`telegram_id`
+  AND f1.`matched_keyword`  = f2.`matched_keyword`
+  AND f1.`id` > f2.`id`;
+```
+
+### چک نهایی (باید خالی باشه)
+
+```sql
+SELECT TABLE_NAME, INDEX_NAME
+FROM INFORMATION_SCHEMA.STATISTICS
+WHERE TABLE_SCHEMA = 'mahyarsa_telegram'
+  AND NON_UNIQUE = 0
+  AND INDEX_NAME != 'PRIMARY';
+```
+
+---
+
+## U7. چک‌لیست به‌روزرسانی از 1.1 به 1.2
+
+- [ ] SQL حذف UNIQUE ها رو اجرا کن
+- [ ] تأیید کن خروجی کوئری چک خالی باشه (فقط PRIMARY)
+- [ ] `src/Database.php` رو با نسخه چک‌دستی جایگزین کن
+- [ ] `filter.php` رو با نسخه چک‌دستی + باگ‌فیکس state جایگزین کن
+- [ ] `purge.php` رو با نسخه چک‌دستی جایگزین کن
+- [ ] تکراری‌های موجود رو پاک کن (کوئری بالا)
+- [ ] `state` رو ریست کن: `rm storage/filter_state.json`
+- [ ] تست با curl (دو بار با یه پیام) → COUNT باید 1 بمونه
+
+---
+
+## U8. مقایسه نسخه‌ها
+
+| ویژگی | 1.0 | 1.1 | 1.2 |
+|-------|:---:|:---:|:---:|
+| UNIQUE در DB | ✅ | ✅ | ❌ |
+| چک در کد | ❌ | ❌ | ✅ |
+| `INSERT IGNORE` | ✅ | ✅ | ❌ |
+| `ON DUPLICATE KEY UPDATE` | ✅ | ✅ | ❌ |
+| محافظت state | ❌ | ❌ | ✅ |
+| فیلد `sender_name`/`group_name` | ❌ | ✅ | ✅ |
+| State resume | ❌ | ✅ | ✅ |
+
+---
+
+## U9. مستندات به‌روز شده دیتابیس
+
+### جدول `messages`
+
+| ستون | نوع | نکته |
+|------|-----|------|
+| `id` | BIGINT UNSIGNED | PRIMARY KEY |
+| `telegram_id` | BIGINT | **یونیک در کد** (نه DB) |
+| `chat_id` | BIGINT | ایندکس معمولی |
+| `group_name` | VARCHAR(190) | ایندکس معمولی |
+| `sender_id` | BIGINT | — |
+| `sender_name` | VARCHAR(190) | — |
+| `text` | TEXT | — |
+| `link` | VARCHAR(512) | — |
+| `date` | BIGINT | — |
+| `date_human` | VARCHAR(32) | — |
+| `created_at` | DATETIME | پیش‌فرض CURRENT_TIMESTAMP |
+
+### جدول `filtered_messages`
+
+| ستون | نوع | نکته |
+|------|-----|------|
+| `id` | BIGINT UNSIGNED | PRIMARY KEY |
+| `message_id` | BIGINT UNSIGNED | ایندکس معمولی |
+| `telegram_id` | BIGINT | **یونیک در کد با `matched_keyword`** |
+| `chat_id` | BIGINT | ایندکس معمولی |
+| `group_name` | VARCHAR(190) | — |
+| `sender_id` | BIGINT | — |
+| `sender_name` | VARCHAR(190) | — |
+| `text` | TEXT | — |
+| `link` | VARCHAR(512) | — |
+| `date` | BIGINT | — |
+| `date_human` | VARCHAR(32) | — |
+| `matched_keyword` | VARCHAR(190) | ایندکس معمولی |
+| `click_count` | INT UNSIGNED | پیش‌فرض 0 |
+| `original_created_at` | DATETIME | — |
+| `filtered_at` | DATETIME | پیش‌فرض CURRENT_TIMESTAMP |
+
+---
+
+**نسخه 1.2 — تاریخ: 2026-10-11**
+**موضوع اصلی:** انتقال یونیک بودن از دیتابیس به کد PHP
+```
+
+---
+
+این بلاک رو به آخر `AGENT.md` (بعد از نسخه 1.1) اضافه کن. کل تغییرات این session رو پوشش می‌ده 🚀
