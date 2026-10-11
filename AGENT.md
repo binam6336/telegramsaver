@@ -856,3 +856,381 @@ RedirectMatch 403 ^/telegram/logs/.*$
 
 
 v 1.0.0 released
+
+
+## 📄 UPDATE Block — به انتهای `AGENT.md` اضافه کن
+
+```markdown
+---
+
+# 🔄 UPDATE — نسخه 1.1 (2026-10-11)
+
+این بخش، تغییرات اعمال‌شده بعد از نسخه ۱.۰ رو توضیح می‌ده. اگه از نسخه قدیمی پروژه استفاده می‌کنی، این تغییرات رو باید اعمال کنی.
+
+---
+
+## U1. فیلدهای جدید در API
+
+### ورودی API جدید
+
+به JSON ورودی، دو فیلد جدید اضافه شده:
+
+```json
+{
+  "id": 31652,
+  "chat_id": -1003472580791,
+  "sender_id": 7914913303,
+  "sender_name": "علی رضایی",         ← جدید
+  "group_name": "گروه پشتیبانی",      ← جدید
+  "text": "ارسال دیجی‌کالا",
+  "link": "https://t.me/c/3472580791/31652",
+  "date": 1791380766,
+  "date_human": "2026-10-07 15:46:06"
+}
+```
+
+| فیلد | نوع | اجباری؟ | توضیح |
+|------|-----|---------|-------|
+| `sender_name` | string | اختیاری | نام نمایشی فرستنده |
+| `group_name` | string | اختیاری | نام گروه/چت |
+
+### تغییرات فایل‌ها
+
+| فایل | تغییر |
+|------|-------|
+| `api.php` | `$normalized[]` — اضافه کردن `sender_name`, `group_name` |
+| `src/Database.php` | `insertMessages()` — اضافه کردن دو ستون |
+| `filter.php` | SELECT و INSERT — اضافه کردن دو ستون |
+| `purge.php` | `runFilterBeforePurge()` — اضافه کردن دو ستون |
+
+---
+
+## U2. اصلاح مشکل پیام‌های تکراری 🔴 مهم
+
+### مشکل
+
+قبل از نسخه ۱.۱، UNIQUE KEY فقط روی `telegram_id` بود:
+
+```sql
+UNIQUE KEY `uniq_telegram_id` (`telegram_id`)  ❌ اشتباه
+```
+
+**چرا اشتباه بود؟**
+
+`telegram_id` (که از `id` میاد) فقط **داخل هر چت** یکتاست. مثلاً:
+
+| chat_id | telegram_id | نتیجه |
+|---------|-------------|-------|
+| -1003472580791 | 31652 | پیام اول |
+| -1003311694628 | 31652 | پیام دوم — ولی UNIQUE جلوش رو می‌گیره! ❌ |
+
+### راه‌حل
+
+UNIQUE KEY روی **ترکیب دو ستون**:
+
+```sql
+UNIQUE KEY `uniq_chat_telegram` (`chat_id`, `telegram_id`)  ✅ صحیح
+```
+
+### تغییرات `src/Database.php`
+
+| قبل | بعد |
+|-----|-----|
+| `INSERT IGNORE` | `INSERT ... ON DUPLICATE KEY UPDATE` |
+| فقط جلوی تکراری رو می‌گرفت | جلوی تکراری رو می‌گیره + فیلدها رو به‌روز می‌کنه |
+| `chat_id` می‌تونه NULL باشه | اجبار به عدد (0 اگه NULL) |
+
+### تغییرات `api.php`
+
+اگه `chat_id` در ورودی نبود یا NULL بود، **رکورد skip می‌شه** (چون بدون اون نمی‌شه تکراری‌ها رو تشخیص داد).
+
+---
+
+## U3. بهینه‌سازی `filter.php` — نسخه سریع
+
+### مشکلات قبلی
+
+1. **Timeout**: سرور بعد از ۳۰-۶۰ ثانیه اتصال رو قطع می‌کرد
+2. **بدون resume**: اگه قطع بشه، از صفر شروع می‌کرد
+3. **AI کند**: پارامترها محافظه‌کارانه بودن
+
+### راه‌حل‌ها
+
+#### 🚀 ۱) پاسخ فوری به کاربر
+
+```php
+// پاسخ JSON فوری برمی‌گرده
+echo json_encode(['ok' => true, 'message' => 'پردازش در پس‌زمینه شروع شد']);
+
+// اتصال به کاربر بسته می‌شه
+fastcgi_finish_request();
+
+// ادامه پردازش در background (کاربر منتظر نیست)
+```
+
+**نتیجه:** کاربر هیچ‌وقت timeout نمی‌گیره. ✅
+
+#### 🗂 ۲) State File برای Resume
+
+فایل `storage/filter_state.json`:
+
+```json
+{
+  "last_processed_message_id": 31653,
+  "keyword_hash": "abc123...",
+  "updated_at": "2026-10-11 14:30:00"
+}
+```
+
+- **بار اول**: از `id=0` شروع می‌کنه (کل دیتابیس)
+- **اگه قطع شد**: بار بعد از آخرین `id` ادامه می‌ده
+- **اگه کلیدواژه‌ها عوض شدن**: خودکار از صفر شروع می‌کنه
+- **دستی از صفر**: `?reset=1`
+
+#### ⚡ ۳) پارامترهای بهینه
+
+| پارامتر | قبل | بعد |
+|---------|:---:|:---:|
+| `AI_PARALLEL` | 15 | **25** |
+| `AI_BATCH_SIZE` | 200 | **300** |
+| `AI_TEXT_LIMIT` | 500 | **300** |
+| `AI_TIMEOUT` | 180 | **120** |
+| `AI_MAX_RUNTIME` | 600 | **900** |
+
+**نتیجه:** حدود **۳ برابر سریع‌تر** برای حجم بالا.
+
+#### 📌 ۴) ذخیره State بعد از هر batch
+
+اگه وسط کار قطع بشه، state حفظ می‌شه و بار بعد ادامه می‌ده.
+
+### نحوه استفاده
+
+| حالت | آدرس |
+|------|------|
+| بار اول (کل DB) | `filter.php` |
+| ادامه از آخرین نقطه | `filter.php` (خودکار) |
+| از صفر | `filter.php?reset=1` |
+
+### کرون پیشنهادی
+
+```cron
+*/5 * * * * /usr/bin/php /home/USER/public_html/telegram/filter.php > /dev/null 2>&1
+```
+
+هر ۵ دقیقه ادامه می‌ده تا همه پیام‌ها پردازش بشن.
+
+---
+
+## U4. منطق فیلتر سه‌لایه
+
+### لایه ۱ — نرمال‌سازی خشن (`normalizePersianAggressive`)
+
+| مرحله | مثال |
+|-------|------|
+| حذف ZWNJ | `نیم‌فاصله` → `نیمفاصله` |
+| حذف اعراب | `مُشکِل` → `مشکل` |
+| یکسان‌سازی ی/ک/ه | `مشكل` → `مشکل` |
+| یکسان‌سازی اعداد | `۱۲۳` → `123` |
+| حذف فاصله‌ها | `تا پین` → `تاپین` |
+| **فروپاشی تکراری** | `بسسته` → `بسته` |
+| lowercase | `TAPIN` → `tapin` |
+
+### لایه ۲ — فازی Levenshtein
+
+- پنجره لغزان روی کلمات متن
+- `utf8Levenshtein` (تابع سفارشی برای یونیکد)
+- اگه فاصله ≤ `FUZZY_MAX_DIST` (پیش‌فرض ۱) → MATCH
+
+### لایه ۳ — هوش مصنوعی
+
+- با `curl_multi` موازی
+- پرامپت قوی برای معنایی + تایپی
+- فقط پیام‌های باقی‌مونده (بعد از لایه ۱ و ۲)
+
+### ترتیب اولویت پرامپت
+
+1. **🥇 معنایی** (مهم‌ترین)
+2. **🥈 تایپی** (خیلی مهم)
+3. **📌 قانون طلایی**: «اگر شک داری، MATCH کن»
+
+---
+
+## U5. Migration SQL کامل
+
+فایل `database.sql` ساخته شد که همه تغییرات رو یک‌جا داره:
+
+```sql
+-- 1) CREATE TABLE IF NOT EXISTS برای همه جداول
+-- 2) ALTER TABLE ADD COLUMN sender_name, group_name
+-- 3) DELETE تکراری‌های موجود
+-- 4) DROP INDEX های اشتباه
+-- 5) ADD UNIQUE KEY صحیح: uniq_chat_telegram
+-- 6) ADD ایندکس‌های بهینه
+```
+
+### UNIQUE KEY های صحیح
+
+| جدول | UNIQUE KEY |
+|------|------------|
+| `messages` | `uniq_chat_telegram (chat_id, telegram_id)` |
+| `filtered_messages` | `uniq_msg_keyword (message_id, matched_keyword)` |
+| `filters` | `uniq_keyword (keyword)` |
+
+### ایندکس‌های جدید
+
+| جدول | ایندکس | کاربرد |
+|------|--------|--------|
+| `messages` | `idx_group_name` | جستجو بر اساس گروه |
+| `messages` | `idx_chat_date` | پیام‌های چت در بازه زمانی |
+| `messages` | `idx_created_at` | مرتب‌سازی بر اساس زمان درج |
+| `filtered_messages` | `idx_filtered_at` | پیام‌های فیلترشده اخیر |
+
+---
+
+## U6. جدول تغییرات خلاصه
+
+| نسخه | تاریخ | تغییرات کلیدی |
+|------|-------|---------------|
+| 1.0 | 2026-10-08 | نسخه اولیه |
+| **1.1** | **2026-10-11** | sender_name/group_name، رفع تکراری، بهینه‌سازی filter |
+
+---
+
+## U7. چک‌لیست به‌روزرسانی از 1.0 به 1.1
+
+- [ ] اجرای `database.sql` (Migration)
+- [ ] تأیید `SHOW INDEX FROM messages` → `uniq_chat_telegram`
+- [ ] تأیید `SHOW INDEX FROM filtered_messages` → `uniq_msg_keyword`
+- [ ] جایگزینی `api.php`
+- [ ] جایگزینی `src/Database.php`
+- [ ] جایگزینی `filter.php`
+- [ ] جایگزینی `purge.php`
+- [ ] اطمینان از پرمیشن ۷۷۵ برای `storage/`
+- [ ] تست با curl (دو بار با یه پیام)
+- [ ] تأیید COUNT = 1
+
+---
+
+## U8. پارامترهای قابل تنظیم سریع
+
+### `filter.php`
+
+```php
+// سرعت بالا (پیشنهادی):
+const AI_PARALLEL   = 25;
+const AI_BATCH_SIZE = 300;
+const AI_TEXT_LIMIT = 300;
+
+// سرور خیلی قوی:
+const AI_PARALLEL   = 35;
+const AI_BATCH_SIZE = 400;
+
+// اگه AI rate limit داد:
+const AI_PARALLEL   = 15;
+const AI_BATCH_SIZE = 200;
+```
+
+### `config.php`
+
+```php
+'api' => [
+    'max_payload_size'  => 5 * 1024 * 1024,  // 5MB
+    'max_rows_per_file' => 1000,              // حداکثر ردیف در هر فایل صف
+],
+
+'worker' => [
+    'max_runtime'     => 50,   // ثانیه
+    'batch_size'      => 500,  // تعداد ردیف در هر INSERT
+    'max_files_run'   => 500,
+],
+```
+
+---
+
+## U9. دستورات مفید روزمره
+
+```bash
+# چک لاگ امروز
+tail -f logs/$(date +%Y-%m-%d).log
+
+# فقط خطاها
+grep -E "\[ERROR\]|\[CRITICAL\]" logs/$(date +%Y-%m-%d).log
+
+# چک state فیلتر
+cat storage/filter_state.json
+
+# ریست state فیلتر
+rm storage/filter_state.json
+
+# ریست کل کار (DB + صف)
+# از مرورگر: purge.php
+```
+
+### کوئری‌های مفید
+
+```sql
+-- آمار کلی
+SELECT 
+  (SELECT COUNT(*) FROM messages) AS total_messages,
+  (SELECT COUNT(*) FROM filtered_messages) AS total_filtered,
+  (SELECT COUNT(DISTINCT matched_keyword) FROM filtered_messages) AS unique_keywords;
+
+-- پرتکرارترین فیلترها
+SELECT matched_keyword, COUNT(*) c 
+FROM filtered_messages 
+GROUP BY matched_keyword 
+ORDER BY c DESC;
+
+-- پیام‌های فیلترشده اخیر
+SELECT id, group_name, sender_name, matched_keyword, LEFT(text, 60) AS preview
+FROM filtered_messages 
+ORDER BY id DESC LIMIT 20;
+
+-- چک تکراری (باید 0 باشه)
+SELECT chat_id, telegram_id, COUNT(*) c
+FROM messages
+GROUP BY chat_id, telegram_id
+HAVING c > 1;
+```
+
+---
+
+## U10. محدودیت‌ها و نکات
+
+### `fastcgi_finish_request`
+
+اگه هاست از **mod_php** استفاده می‌کنه (نه PHP-FPM)، این تابع وجود نداره. در این حالت:
+- fallback به `flush()` می‌ره
+- ممکنه بازم timeout رخ بده
+- **ولی state file نجاتت می‌ده** — بار بعد ادامه می‌ده
+
+### پردازش چند‌باره
+
+اگه با کرون `filter.php` رو هر ۵ دقیقه صدا بزنی:
+- هر بار فقط پیام‌های جدید (`id > last_processed`) رو پردازش می‌کنه
+- سریع و سبک
+
+### کلیدواژه جدید
+
+اگه یه کلیدواژه جدید به جدول `filters` اضافه کنی:
+- خودکار کلیدواژه‌ها رو fresh می‌خونه
+- ولی چون hash عوض می‌شه، **از صفر شروع می‌کنه** (کل دیتابیس رو دوباره فیلتر می‌کنه)
+- برای همین بار اول بعد از اضافه کردن کلیدواژه، ممکنه طول بکشه
+
+**راه‌حل:** اگه می‌خوای از صفر نره، `filter_state.json` رو دستی ویرایش کن و `keyword_hash` رو به hash جدید تغییر بده.
+
+---
+
+**نسخه 1.1 — تاریخ: 2026-10-11**
+```
+
+---
+
+## 🎯 نحوه استفاده از این بلاک
+
+1. فایل `AGENT.md` رو باز کن
+2. **کل این بلاک** رو کپی کن
+3. به **انتهای فایل** (بعد از بخش «نسخه 1.0») پیست کن
+4. ذخیره کن
+
+این بلاک رو به‌عنوان UPDATE در انتهای AGENT.md بذار تا هر کسی که از نسخه قدیمی میاد، بدونه چی تغییر کرده. اگه خواستی بخش خاصی رو بازتر کنم بگو 🚀ب
