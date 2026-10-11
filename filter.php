@@ -13,18 +13,45 @@ header('Content-Type: application/json; charset=utf-8');
 /** @var array $config */
 
 // ============================================================
-// ⚙️ تنظیمات
+// ⚙️ تنظیمات بهینه‌شده (سرعت بالاتر)
 // ============================================================
 const AI_URL         = 'https://hermes.ai.unturf.com/v1/chat/completions';
 const AI_MODEL       = 'turboderp/Qwen3.8-27B-exl3';
-const AI_TIMEOUT     = 180;
-const AI_BATCH_SIZE  = 200;
-const AI_PARALLEL    = 15;
-const AI_MAX_RUNTIME = 600;
-const AI_TEXT_LIMIT  = 500;
+const AI_TIMEOUT     = 120;
+const AI_BATCH_SIZE  = 300;   // ← بزرگ‌تر = درخواست کمتر
+const AI_PARALLEL    = 25;    // ← موازی‌تر = سرعت بالاتر
+const AI_MAX_RUNTIME = 900;   // ۱۵ دقیقه (در background مهم نیست)
+const AI_TEXT_LIMIT  = 300;   // ← کوتاه‌تر = توکن کمتر
 
 const FUZZY_MAX_DIST = 1;
 const FUZZY_MIN_WORD = 4;
+
+const STATE_FILE = __DIR__ . '/storage/filter_state.json';
+
+// ============================================================
+// 🚀 پاسخ فوری به کاربر + ادامه در background
+// این کار از timeout جلوگیری می‌کنه
+// ============================================================
+$reset = isset($_GET['reset']) && $_GET['reset'] === '1';
+
+echo json_encode([
+    'ok'         => true,
+    'message'    => 'پردازش در پس‌زمینه شروع شد. لاگ‌ها را چک کنید.',
+    'started_at' => date('Y-m-d H:i:s'),
+    'reset'      => $reset,
+], JSON_UNESCAPED_UNICODE);
+
+if (function_exists('fastcgi_finish_request')) {
+    fastcgi_finish_request();
+} else {
+    while (ob_get_level() > 0) {
+        ob_end_flush();
+    }
+    flush();
+}
+
+// ⬇️ از اینجا به بعد کاربر منتظر نیست، در background ادامه بده
+// (اگه سرور قوی باشه، می‌تونه تا ساعت‌ها ادامه بده)
 
 try {
     Database::connect($config['db']);
@@ -44,38 +71,66 @@ try {
 
     if (empty($keywordList)) {
         Logger::info('جدول فیلتر خالی است', 'Filters table is empty');
-        echo json_encode(['ok' => true, 'keywords' => 0, 'total_new' => 0], JSON_UNESCAPED_UNICODE);
         exit;
     }
 
+    $keywordHash = md5(implode('|', $keywordList));
+
+    // ============================================================
+    // ۲) State: ادامه از آخرین نقطه
+    // ============================================================
+    $state = loadState();
+    $lastProcessedId = 0;
+    $resumeMode = false;
+
+    if ($reset) {
+        Logger::info('شروع از صفر (reset=1)', 'Starting from scratch (reset=1)');
+    } elseif ($state['keyword_hash'] === $keywordHash && $state['last_processed_message_id'] > 0) {
+        $lastProcessedId = (int) $state['last_processed_message_id'];
+        $resumeMode = true;
+        Logger::info('ادامه از آخرین نقطه', 'Resuming from last point', [
+            'last_id' => $lastProcessedId,
+        ]);
+    } else {
+        Logger::info('شروع از صفر (کلیدواژه‌ها تغییر کرد یا اولین اجرا)', 'Starting from scratch (keywords changed or first run)');
+    }
+
+    // ============================================================
+    // ۳) نرمال‌سازی کلیدواژه‌ها
+    // ============================================================
     $normalizedKeywords = [];
     foreach ($keywordList as $kw) {
         $normalizedKeywords[$kw] = normalizePersianAggressive($kw);
     }
 
-    Logger::info('شروع فیلترگذاری', 'Filtering started', ['keywords' => $keywordList]);
-
     // ============================================================
-    // ۲) پیام‌ها
+    // ۴) پیام‌ها (فقط id > lastProcessedId)
     // ============================================================
-    $stmt = $pdo->query(
+    $stmt = $pdo->prepare(
         'SELECT `id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
                 `text`, `link`, `date`, `date_human`, `created_at`
          FROM `messages`
-         WHERE `text` IS NOT NULL AND `text` != ""
+         WHERE `text` IS NOT NULL AND `text` != "" AND `id` > ?
          ORDER BY `id` ASC'
     );
+    $stmt->execute([$lastProcessedId]);
     $allMessages = $stmt->fetchAll(PDO::FETCH_ASSOC);
     $totalMessages = count($allMessages);
 
     if ($totalMessages === 0) {
-        Logger::info('پیامی وجود ندارد', 'No messages');
-        echo json_encode(['ok' => true, 'keywords' => count($keywordList), 'total_new' => 0], JSON_UNESCAPED_UNICODE);
+        Logger::info('پیام جدیدی برای فیلتر نیست', 'No new messages to filter');
+        saveState($lastProcessedId, $keywordHash);
         exit;
     }
 
+    Logger::info('پیام‌ها آماده پردازش', 'Messages ready for processing', [
+        'total'     => $totalMessages,
+        'from_id'   => $lastProcessedId,
+        'resume'    => $resumeMode ? 'yes' : 'no',
+    ]);
+
     // ============================================================
-    // ۳) statement درج
+    // ۵) درج statement
     // ============================================================
     $insertStmt = $pdo->prepare(
         'INSERT IGNORE INTO `filtered_messages`
@@ -90,16 +145,20 @@ try {
     }
 
     // ============================================================
-    // ۴) لایه ۱+۲: نرمال‌سازی + فازی
+    // ۶) لایه ۱+۲: نرمال‌سازی + فازی (سریع، فوری)
     // ============================================================
-    $totalNew    = 0;
-    $preFilterHit = [];
-    $remaining    = [];
+    $totalNew       = 0;
+    $preFilterHit   = [];
+    $remaining      = [];
+    $maxProcessedId = $lastProcessedId;
 
     foreach ($allMessages as $m) {
-        $text   = (string) $m['text'];
-        $norm   = normalizePersianAggressive($text);
-        $words  = preg_split('/\s+/u', trim($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $id = (int) $m['id'];
+        if ($id > $maxProcessedId) $maxProcessedId = $id;
+
+        $text  = (string) $m['text'];
+        $norm  = normalizePersianAggressive($text);
+        $words = preg_split('/\s+/u', trim($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
         $matchedKw = null;
 
         foreach ($normalizedKeywords as $origKw => $normKw) {
@@ -117,13 +176,13 @@ try {
         }
 
         if ($matchedKw !== null) {
-            $preFilterHit[(int) $m['id']] = $matchedKw;
+            $preFilterHit[$id] = $matchedKw;
         } else {
             $remaining[] = $m;
         }
     }
 
-    // درج نتایج پیش‌فیلتر
+    // درج نتایج pre-filter
     $preFilterCount = 0;
     foreach ($preFilterHit as $msgId => $kw) {
         $msg = $messagesById[$msgId] ?? null;
@@ -153,7 +212,7 @@ try {
     ]);
 
     // ============================================================
-    // ۵) لایه ۳: AI
+    // ۷) لایه ۳: AI (موازی، بهینه)
     // ============================================================
     $aiMatched = 0;
 
@@ -171,11 +230,29 @@ try {
         $totalBatches = count($batches);
 
         Logger::info('شروع AI موازی', 'Parallel AI started', [
-            'batches'  => $totalBatches,
-            'parallel' => AI_PARALLEL,
+            'batches'    => $totalBatches,
+            'parallel'   => AI_PARALLEL,
+            'batch_size' => AI_BATCH_SIZE,
+            'remaining'  => count($remaining),
         ]);
 
-        $batchResults = sendBatchesInParallel($batches, $keywordList, $startTime);
+        // callback: بعد از هر batch موفق، آخرین id رو ذخیره کن
+        $onBatchDone = function (int $batchIdx) use ($batches, $keywordHash, &$lastSavedId) {
+            // آخرین id در این batch
+            $lastMsg = end($batches[$batchIdx]);
+            $lastId  = (int) ($lastMsg['i'] ?? 0);
+            if ($lastId > $lastSavedId) {
+                $lastSavedId = $lastId;
+                saveState($lastSavedId, $keywordHash);
+            }
+        };
+
+        $batchResults = sendBatchesInParallel(
+            $batches,
+            $keywordList,
+            $startTime,
+            $onBatchDone
+        );
 
         foreach ($batchResults as $aiResult) {
             if (empty($aiResult['matches'])) continue;
@@ -207,38 +284,76 @@ try {
         }
     }
 
+    // ذخیره state نهایی
+    saveState($maxProcessedId, $keywordHash);
+
     // ============================================================
-    // ۶) آمار
+    // ۸) آمار نهایی
     // ============================================================
     $totalInTable = (int) $pdo->query('SELECT COUNT(*) FROM `filtered_messages`')->fetchColumn();
     $duration     = time() - $startTime;
 
     Logger::info('فیلترگذاری کامل شد', 'Filtering completed', [
-        'pre_filter'     => $preFilterCount,
-        'ai_matched'     => $aiMatched,
-        'total_new'      => $totalNew,
-        'total_in_table' => $totalInTable,
-        'duration'       => $duration,
-    ]);
-
-    echo json_encode([
-        'ok'             => true,
-        'keywords'       => count($keywordList),
         'messages'       => $totalMessages,
         'pre_filter'     => $preFilterCount,
         'ai_matched'     => $aiMatched,
         'total_new'      => $totalNew,
         'total_in_table' => $totalInTable,
-        'duration_sec'   => $duration,
-    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        'last_id'        => $maxProcessedId,
+        'duration'       => $duration,
+    ]);
 } catch (Throwable $e) {
-    Logger::critical('خطای کلی', 'Fatal error', [
+    Logger::critical('خطای کلی در فیلترگذاری', 'Fatal error in filtering', [
         'message' => $e->getMessage(),
         'file'    => $e->getFile(),
         'line'    => $e->getLine(),
     ]);
-    http_response_code(500);
-    echo json_encode(['ok' => false, 'message' => 'خطای داخلی سرور'], JSON_UNESCAPED_UNICODE);
+}
+
+// ============================================================
+// 🗂 State Management (ادامه از آخرین نقطه)
+// ============================================================
+function loadState(): array
+{
+    $default = [
+        'last_processed_message_id' => 0,
+        'keyword_hash'              => '',
+    ];
+
+    if (!file_exists(STATE_FILE)) {
+        return $default;
+    }
+
+    $json = @file_get_contents(STATE_FILE);
+    if ($json === false || $json === '') {
+        return $default;
+    }
+
+    $data = json_decode($json, true);
+    if (!is_array($data)) {
+        return $default;
+    }
+
+    return [
+        'last_processed_message_id' => (int) ($data['last_processed_message_id'] ?? 0),
+        'keyword_hash'              => (string) ($data['keyword_hash'] ?? ''),
+    ];
+}
+
+function saveState(int $lastId, string $keywordHash): void
+{
+    $data = [
+        'last_processed_message_id' => $lastId,
+        'keyword_hash'              => $keywordHash,
+        'updated_at'                => date('Y-m-d H:i:s'),
+    ];
+
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE);
+    $tmp  = STATE_FILE . '.tmp';
+
+    if (@file_put_contents($tmp, $json, LOCK_EX) !== false) {
+        @rename($tmp, STATE_FILE);
+    }
 }
 
 // ============================================================
@@ -383,9 +498,9 @@ function utf8Levenshtein(string $a, string $b): int
 }
 
 // ============================================================
-// 🚀 ارسال موازی
+// 🚀 ارسال موازی به AI با callback
 // ============================================================
-function sendBatchesInParallel(array $batches, array $keywords, int $startTime): array
+function sendBatchesInParallel(array $batches, array $keywords, int $startTime, ?callable $onBatchDone = null): array
 {
     $results   = [];
     $total     = count($batches);
@@ -405,7 +520,7 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
             'temperature' => 0.0,
             'top_p'       => 0.9,
             'stream'      => false,
-            'max_tokens'  => 1500,
+            'max_tokens'  => 2000,
         ], JSON_UNESCAPED_UNICODE);
 
         $ch = curl_init(AI_URL);
@@ -432,6 +547,14 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
     };
 
     $mh = curl_multi_init();
+
+    // محدودیت‌های curl_multi برای بهینه‌سازی
+    if (defined('CURLMOPT_MAX_TOTAL_CONNECTIONS')) {
+        curl_multi_setopt($mh, CURLMOPT_MAX_TOTAL_CONNECTIONS, AI_PARALLEL + 2);
+    }
+    if (defined('CURLMOPT_MAX_HOST_CONNECTIONS')) {
+        curl_multi_setopt($mh, CURLMOPT_MAX_HOST_CONNECTIONS, AI_PARALLEL + 2);
+    }
 
     while (count($active) < AI_PARALLEL && $nextIndex < $total) {
         $ch = $makeHandle($batches[$nextIndex]);
@@ -466,6 +589,8 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
             curl_close($ch);
             unset($active[$chId]);
 
+            $success = false;
+
             if ($errno || $httpCode !== 200) {
                 Logger::warning('خطا در batch', 'AI batch failed', [
                     'batch' => $batchIdx + 1,
@@ -486,6 +611,7 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
                     $results[$batchIdx] = ['matches' => []];
                 } else {
                     $results[$batchIdx] = ['matches' => $parsed['matches'] ?? []];
+                    $success = true;
                     Logger::info('batch انجام شد', 'AI batch done', [
                         'batch'   => ($batchIdx + 1) . '/' . $total,
                         'matched' => count($parsed['matches'] ?? []),
@@ -493,6 +619,18 @@ function sendBatchesInParallel(array $batches, array $keywords, int $startTime):
                 }
             }
 
+            // 📌 ذخیره state بعد از هر batch
+            if ($success && $onBatchDone !== null && $batchIdx >= 0) {
+                try {
+                    $onBatchDone($batchIdx);
+                } catch (Throwable $e) {
+                    Logger::warning('خطا در ذخیره state', 'State save failed', [
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            // اضافه کردن batch بعدی
             if ($nextIndex < $total) {
                 $newCh = $makeHandle($batches[$nextIndex]);
                 curl_multi_add_handle($mh, $newCh);
@@ -557,7 +695,7 @@ EOT;
 }
 
 // ============================================================
-// 🔍 استخراج JSON
+// 🔍 استخراج JSON از پاسخ AI
 // ============================================================
 function extractJsonFromAi(string $text): ?array
 {
