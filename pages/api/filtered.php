@@ -59,8 +59,11 @@ function handle_list(PDO $pdo): void
         $where[] = 'vm.id IS NULL AND im.id IS NULL';
     }
 
-    /* ⭐ حذف چت‌های مسدود */
-    $where[] = 'fm.chat_id NOT IN (SELECT chat_id FROM `' . BLOCKED_TABLE . '`)';
+    /* ⭐ NOT EXISTS — هم چت‌های مسدود را حذف می‌کند هم NULL-safe است */
+    $where[] = 'NOT EXISTS (
+        SELECT 1 FROM `' . BLOCKED_TABLE . '` b
+        WHERE b.chat_id = fm.chat_id
+    )';
 
     if ($q !== '') {
         $where[] = '(fm.text LIKE :q
@@ -124,9 +127,17 @@ function handle_list(PDO $pdo): void
         ];
     }, $rows);
 
-    $keywords = $pdo->query(
-        "SELECT DISTINCT matched_keyword FROM `" . FM_TABLE . "` ORDER BY matched_keyword"
-    )->fetchAll(PDO::FETCH_COLUMN);
+    /* ⭐ لیست کلمات کلیدی فقط از چت‌های غیرمسدود */
+    $stmt = $pdo->prepare(
+        "SELECT DISTINCT fm.matched_keyword
+         FROM `" . FM_TABLE . "` fm
+         WHERE NOT EXISTS (
+             SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = fm.chat_id
+         )
+         ORDER BY fm.matched_keyword"
+    );
+    $stmt->execute();
+    $keywords = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
     json_ok([
         'total'    => $total,
@@ -204,24 +215,31 @@ function handle_toggle_irrelevant(PDO $pdo): void
 ========================================================= */
 function get_counts(PDO $pdo): array
 {
+    /* ⭐ هر سه شمارنده با NOT EXISTS روی چت‌های مسدود */
     $all = (int)$pdo->query(
         "SELECT COUNT(*) FROM `" . FM_TABLE . "` fm
          LEFT JOIN `" . VIEWED_TABLE . "` vm ON vm.filtered_message_id = fm.id
          LEFT JOIN `" . IRREL_TABLE  . "` im ON im.filtered_message_id = fm.id
          WHERE vm.id IS NULL AND im.id IS NULL
-           AND fm.chat_id NOT IN (SELECT chat_id FROM `" . BLOCKED_TABLE . "`)"
+           AND NOT EXISTS (
+               SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = fm.chat_id
+           )"
     )->fetchColumn();
 
     $viewed = (int)$pdo->query(
         "SELECT COUNT(*) FROM `" . VIEWED_TABLE . "` vm
          JOIN `" . FM_TABLE . "` fm ON fm.id = vm.filtered_message_id
-         WHERE fm.chat_id NOT IN (SELECT chat_id FROM `" . BLOCKED_TABLE . "`)"
+         WHERE NOT EXISTS (
+             SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = fm.chat_id
+         )"
     )->fetchColumn();
 
     $irrelevant = (int)$pdo->query(
         "SELECT COUNT(*) FROM `" . IRREL_TABLE . "` im
          JOIN `" . FM_TABLE . "` fm ON fm.id = im.filtered_message_id
-         WHERE fm.chat_id NOT IN (SELECT chat_id FROM `" . BLOCKED_TABLE . "`)"
+         WHERE NOT EXISTS (
+             SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = fm.chat_id
+         )"
     )->fetchColumn();
 
     return ['all' => $all, 'viewed' => $viewed, 'irrelevant' => $irrelevant];

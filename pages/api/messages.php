@@ -5,7 +5,8 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../db.php';
 
-const MSG_TABLE = 'messages';
+const MSG_TABLE     = 'messages';
+const BLOCKED_TABLE = 'blocked_chats';
 
 try {
     $pdo = db();
@@ -22,7 +23,7 @@ try {
     $COL_TEXT    = $pick(['text', 'message', 'content', 'body', 'caption']);
     $COL_SENDER  = $pick(['sender_name', 'sender', 'from_name', 'username', 'first_name']);
     $COL_GROUP   = $pick(['group_name', 'chat_title', 'group', 'chat_name']);
-    $COL_CHATID  = $pick(['chat_id']);                           // ⭐ جدید
+    $COL_CHATID  = $pick(['chat_id']);
     $COL_DATE    = $pick(['date_human', 'created_at', 'date', 'sent_at', 'inserted_at']);
     $COL_LINK    = $pick(['link', 'url', 'message_link', 'source_url', 'original_url', 'tg_link']);
 
@@ -31,26 +32,36 @@ try {
     $perPage = 15;
     $offset  = ($page - 1) * $perPage;
 
-    $where  = '';
+    $where  = [];
     $params = [];
+
+    /* ⭐ NOT EXISTS — NULL-safe و سریع‌تر */
+    if ($COL_CHATID) {
+        $where[] = "NOT EXISTS (
+            SELECT 1 FROM `" . BLOCKED_TABLE . "` b
+            WHERE b.chat_id = `$COL_CHATID`
+        )";
+    }
 
     if ($q !== '') {
         $searchable = array_values(array_filter([$COL_TEXT, $COL_SENDER, $COL_GROUP]));
         if ($searchable) {
             $parts = [];
             foreach ($searchable as $c) $parts[] = "`$c` LIKE :q";
-            $where = 'WHERE (' . implode(' OR ', $parts) . ')';
+            $where[] = '(' . implode(' OR ', $parts) . ')';
             $params[':q'] = "%{$q}%";
         }
     }
 
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM `" . MSG_TABLE . "` {$where}");
+    $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM `" . MSG_TABLE . "` {$whereSql}");
     $stmt->execute($params);
     $total = (int)$stmt->fetchColumn();
 
     $orderBy = $COL_ID ? "`$COL_ID` DESC" : '1';
     $stmt = $pdo->prepare(
-        "SELECT * FROM `" . MSG_TABLE . "` {$where} ORDER BY {$orderBy} LIMIT {$perPage} OFFSET {$offset}"
+        "SELECT * FROM `" . MSG_TABLE . "` {$whereSql} ORDER BY {$orderBy} LIMIT {$perPage} OFFSET {$offset}"
     );
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
@@ -70,7 +81,7 @@ try {
             'id'          => $COL_ID     ? ($r[$COL_ID]     ?? null) : null,
             'sender_name' => $COL_SENDER ? ($r[$COL_SENDER] ?? '')   : '',
             'group_name'  => $COL_GROUP  ? ($r[$COL_GROUP]  ?? '')   : '',
-            'chat_id'     => $COL_CHATID ? ($r[$COL_CHATID] ?? null) : null,   // ⭐ جدید
+            'chat_id'     => $COL_CHATID ? ($r[$COL_CHATID] ?? null) : null,
             'text'        => $text,
             'date'        => $COL_DATE   ? ($r[$COL_DATE]   ?? '')   : '',
             'link'        => $link,
