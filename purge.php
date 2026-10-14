@@ -15,6 +15,19 @@ header('Content-Type: application/json; charset=utf-8');
 
 /** @var array $config */
 
+// ============================================================
+// 🧨 فایل پاک‌سازی همه چیز
+// - messages
+// - filtered_messages
+// - irrelevant_messages
+// - viewed_messages
+// - فایل‌های صف (queue, processing, failed)
+// - فایل state فیلتر
+// - reset AUTO_INCREMENT همه جداول
+// - فیلترها (filters) دست‌نخورده می‌مونن
+// - blocked_chats دست‌نخورده می‌مونن
+// ============================================================
+
 try {
     Database::connect($config['db']);
 
@@ -25,40 +38,89 @@ try {
     $pdo  = $prop->getValue();
 
     // ============================================================
-    // 🔎 مرحله ۱: قبل از پاک‌سازی، یک بار فیلترگذاری
+    // 🔢 شمارش قبل از پاک‌سازی
     // ============================================================
-    Logger::info(
-        'شروع فیلترگذاری خودکار قبل از پاک‌سازی',
-        'Auto-filtering before purge started'
-    );
+    $tables = [
+        'messages',
+        'filtered_messages',
+        'irrelevant_messages',
+        'viewed_messages',
+    ];
 
-    $filterResult = runFilterBeforePurge($pdo);
-
-    Logger::info(
-        'فیلترگذاری قبل از پاک‌سازی انجام شد',
-        'Pre-purge filtering completed',
-        $filterResult
-    );
-
-    // ============================================================
-    // 🧨 مرحله ۲: پاک‌سازی دیتابیس
-    // ============================================================
-    $before = (int) $pdo->query('SELECT COUNT(*) FROM `messages`')->fetchColumn();
+    $before = [];
+    foreach ($tables as $t) {
+        try {
+            $before[$t] = (int) $pdo->query("SELECT COUNT(*) FROM `$t`")->fetchColumn();
+        } catch (Throwable $e) {
+            $before[$t] = -1; // جدول وجود نداره
+        }
+    }
 
     Logger::warning(
         'شروع پاک‌سازی کامل دیتابیس',
         'Full database purge started',
         [
-            'ip'          => $_SERVER['REMOTE_ADDR'] ?? null,
-            'rows_before' => $before,
-            'filtered'    => $filterResult['total_new'],
+            'ip'     => $_SERVER['REMOTE_ADDR'] ?? null,
+            'before' => $before,
         ]
     );
 
-    $pdo->exec('DELETE FROM `messages`');
-    $pdo->exec('ALTER TABLE `messages` AUTO_INCREMENT = 1');
+    // ============================================================
+    // 🧨 مرحله ۱: پاک کردن جداول وابسته اول (به ترتیب صحیح)
+    // ============================================================
+    // ترتیب مهمه چون ممکنه FK داشته باشن — ولی اینجا FK نداریم
+    // با این حال، ترتیب منطقی رو رعایت می‌کنیم
+    // ============================================================
 
-    // ---- پاک کردن فایل‌های صف ----
+    $deleted = [];
+
+    // 1) irrelevant_messages
+    try {
+        $pdo->exec('DELETE FROM `irrelevant_messages`');
+        $pdo->exec('ALTER TABLE `irrelevant_messages` AUTO_INCREMENT = 1');
+        $deleted['irrelevant_messages'] = $before['irrelevant_messages'];
+    } catch (Throwable $e) {
+        Logger::error('خطا در پاک‌سازی irrelevant_messages', 'Failed to purge irrelevant_messages', [
+            'message' => $e->getMessage(),
+        ]);
+    }
+
+    // 2) viewed_messages
+    try {
+        $pdo->exec('DELETE FROM `viewed_messages`');
+        $pdo->exec('ALTER TABLE `viewed_messages` AUTO_INCREMENT = 1');
+        $deleted['viewed_messages'] = $before['viewed_messages'];
+    } catch (Throwable $e) {
+        Logger::error('خطا در پاک‌سازی viewed_messages', 'Failed to purge viewed_messages', [
+            'message' => $e->getMessage(),
+        ]);
+    }
+
+    // 3) filtered_messages
+    try {
+        $pdo->exec('DELETE FROM `filtered_messages`');
+        $pdo->exec('ALTER TABLE `filtered_messages` AUTO_INCREMENT = 1');
+        $deleted['filtered_messages'] = $before['filtered_messages'];
+    } catch (Throwable $e) {
+        Logger::error('خطا در پاک‌سازی filtered_messages', 'Failed to purge filtered_messages', [
+            'message' => $e->getMessage(),
+        ]);
+    }
+
+    // 4) messages
+    try {
+        $pdo->exec('DELETE FROM `messages`');
+        $pdo->exec('ALTER TABLE `messages` AUTO_INCREMENT = 1');
+        $deleted['messages'] = $before['messages'];
+    } catch (Throwable $e) {
+        Logger::error('خطا در پاک‌سازی messages', 'Failed to purge messages', [
+            'message' => $e->getMessage(),
+        ]);
+    }
+
+    // ============================================================
+    // 🗑 مرحله ۲: پاک کردن فایل‌های صف
+    // ============================================================
     $queueFiles = 0;
     foreach (
         [
@@ -67,36 +129,70 @@ try {
             $config['paths']['failed'],
         ] as $dir
     ) {
+        if (!is_dir($dir)) continue;
+
         $files = glob($dir . '/*.json') ?: [];
         foreach ($files as $f) {
-            @unlink($f);
-            $queueFiles++;
+            if (@unlink($f)) $queueFiles++;
         }
     }
 
-    $after = (int) $pdo->query('SELECT COUNT(*) FROM `messages`')->fetchColumn();
+    Logger::info('فایل‌های صف پاک شدند', 'Queue files purged', [
+        'files_deleted' => $queueFiles,
+    ]);
 
+    // ============================================================
+    // 🗂 مرحله ۳: پاک کردن فایل state فیلتر
+    // ============================================================
+    $stateFile = __DIR__ . '/storage/filter_state.json';
+    $stateDeleted = false;
+    if (file_exists($stateFile)) {
+        if (@unlink($stateFile)) {
+            $stateDeleted = true;
+        }
+    }
+
+    Logger::info('فایل state فیلتر پاک شد', 'Filter state file purged', [
+        'deleted' => $stateDeleted,
+    ]);
+
+    // ============================================================
+    // 🔢 شمارش بعد از پاک‌سازی
+    // ============================================================
+    $after = [];
+    foreach ($tables as $t) {
+        try {
+            $after[$t] = (int) $pdo->query("SELECT COUNT(*) FROM `$t`")->fetchColumn();
+        } catch (Throwable $e) {
+            $after[$t] = -1;
+        }
+    }
+
+    // ============================================================
+    // 📊 لاگ نهایی
+    // ============================================================
     Logger::warning(
         'پاک‌سازی کامل دیتابیس انجام شد',
         'Full database purge completed',
         [
-            'rows_before' => $before,
-            'rows_after'  => $after,
-            'deleted'     => $before - $after,
-            'queue_files' => $queueFiles,
-            'filtered'    => $filterResult['total_new'],
+            'deleted'       => $deleted,
+            'after'         => $after,
+            'queue_files'   => $queueFiles,
+            'state_deleted' => $stateDeleted,
         ]
     );
 
+    // ============================================================
+    // 📤 پاسخ JSON
+    // ============================================================
     echo json_encode([
-        'ok'               => true,
-        'filtered'         => $filterResult['total_new'],
-        'filtered_details' => $filterResult['details'],
-        'deleted'          => $before - $after,
-        'before'           => $before,
-        'after'            => $after,
-        'queue_files'      => $queueFiles,
-    ], JSON_UNESCAPED_UNICODE);
+        'ok'            => true,
+        'deleted'       => $deleted,
+        'after'         => $after,
+        'queue_files'   => $queueFiles,
+        'state_deleted' => $stateDeleted,
+        'message'       => 'همه چیز پاک شد (به‌جز filters و blocked_chats)',
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 } catch (Throwable $e) {
     Logger::critical(
         'خطا در پاک‌سازی دیتابیس',
@@ -110,80 +206,4 @@ try {
 
     http_response_code(500);
     echo json_encode(['ok' => false, 'message' => 'خطای داخلی سرور'], JSON_UNESCAPED_UNICODE);
-}
-
-// ============================================================
-// 🧩 تابع کمکی: فیلترگذاری قبل از پاک‌سازی
-// ============================================================
-function runFilterBeforePurge(PDO $pdo): array
-{
-    $keywords = $pdo->query('SELECT `id`, `keyword` FROM `filters`')->fetchAll(PDO::FETCH_ASSOC);
-
-    if (empty($keywords)) {
-        return [
-            'keywords'  => 0,
-            'total_new' => 0,
-            'details'   => [],
-        ];
-    }
-
-    $insertSql = 'INSERT IGNORE INTO `filtered_messages`
-        (`message_id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
-         `text`, `link`, `date`, `date_human`, `matched_keyword`, `original_created_at`)
-        SELECT `id`, `telegram_id`, `chat_id`, `group_name`, `sender_id`, `sender_name`,
-               `text`, `link`, `date`, `date_human`, ?, `created_at`
-        FROM `messages`
-        WHERE `text` LIKE ? ESCAPE "\\\\"';
-
-    $stmt = $pdo->prepare($insertSql);
-
-    $totalNew = 0;
-    $details  = [];
-
-    foreach ($keywords as $kw) {
-        $keyword = (string) $kw['keyword'];
-        if ($keyword === '') {
-            continue;
-        }
-
-        $escaped = str_replace(
-            ['\\',   '%',   '_'],
-            ['\\\\', '\\%', '\\_'],
-            $keyword
-        );
-        $pattern = '%' . $escaped . '%';
-
-        try {
-            $stmt->execute([$keyword, $pattern]);
-            $inserted = $stmt->rowCount();
-            $totalNew += $inserted;
-
-            $details[] = [
-                'keyword' => $keyword,
-                'new'     => $inserted,
-            ];
-
-            Logger::info(
-                'فیلتر یک کلیدواژه انجام شد',
-                'Keyword filter done',
-                ['keyword' => $keyword, 'new' => $inserted]
-            );
-        } catch (Throwable $e) {
-            Logger::error(
-                'خطا در فیلتر یک کلیدواژه',
-                'Error filtering a keyword',
-                [
-                    'keyword' => $keyword,
-                    'message' => $e->getMessage(),
-                    'line'    => $e->getLine(),
-                ]
-            );
-        }
-    }
-
-    return [
-        'keywords'  => count($keywords),
-        'total_new' => $totalNew,
-        'details'   => $details,
-    ];
 }
