@@ -24,8 +24,6 @@ try {
         'unique_senders' => (int)$pdo->query("SELECT COUNT(DISTINCT sender_name) FROM `" . MSG_TABLE . "` WHERE sender_name IS NOT NULL AND sender_name <> ''")->fetchColumn(),
         'total_clicks'   => (int)$pdo->query("SELECT COALESCE(SUM(click_count), 0) FROM `" . MSG_TABLE . "`")->fetchColumn(),
     ];
-
-    /* filtered count — graceful اگر جدول وجود نداشت */
     try {
         $data['stats']['filtered'] = (int)$pdo->query("SELECT COUNT(*) FROM `" . FM_TABLE . "`")->fetchColumn();
     } catch (Throwable $e) {
@@ -35,10 +33,7 @@ try {
     /* =========================================================
        KEYWORDS → GROUPS
        ────────────────────────────────────────────────────────
-       اسم گروه با سه لایه fallback:
-       ۱) m.group_name خود پیام متناظر
-       ۲) از پیام دیگری با همان chat_id
-       ۳) "گروه {chat_id}"
+       استفاده از derived table برای نگاشت chat_id → group_name
     ========================================================= */
     $keywords = [];
     try {
@@ -46,12 +41,7 @@ try {
             "SELECT fm.matched_keyword AS keyword,
                     COALESCE(
                         NULLIF(m.group_name, ''),
-                        (SELECT m2.group_name
-                         FROM `" . MSG_TABLE . "` m2
-                         WHERE m2.chat_id = fm.chat_id
-                           AND m2.group_name IS NOT NULL
-                           AND m2.group_name <> ''
-                         LIMIT 1),
+                        gn.group_name,
                         CONCAT('گروه ', fm.chat_id)
                     ) AS group_name,
                     COUNT(*) AS count
@@ -59,6 +49,14 @@ try {
              LEFT JOIN `" . MSG_TABLE . "` m
                     ON m.telegram_id = fm.telegram_id
                    AND m.chat_id     = fm.chat_id
+             LEFT JOIN (
+                 SELECT chat_id, MAX(group_name) AS group_name
+                 FROM `" . MSG_TABLE . "`
+                 WHERE chat_id IS NOT NULL
+                   AND group_name IS NOT NULL
+                   AND group_name <> ''
+                 GROUP BY chat_id
+             ) gn ON gn.chat_id = fm.chat_id
              GROUP BY fm.matched_keyword, group_name
              ORDER BY fm.matched_keyword ASC, count DESC"
         )->fetchAll();
@@ -89,23 +87,17 @@ try {
     $data['keywords'] = $keywords;
 
     /* =========================================================
-       TOP SENDERS — هر شخص چقدر از کلمات کلیدی استفاده کرده
+       TOP SENDERS — ⭐ استفاده از derived table برای sender_name
        ────────────────────────────────────────────────────────
-       اسم فرستنده با سه لایه fallback:
-       ۱) m.sender_name خود پیام متناظر
-       ۲) از هر پیام دیگری با همان sender_id
-       ۳) "کاربر {sender_id}"
+       نگاشت sender_id → sender_name از کل جدول messages ساخته می‌شود.
+       بعد هر رکورد filtered به آن JOIN می‌شود.
+       نتیجه: همیشه نام واقعی، حتی اگر پیام متناظر پیدا نشود.
     ========================================================= */
     try {
         $data['top_senders'] = $pdo->query(
             "SELECT COALESCE(
                         NULLIF(m.sender_name, ''),
-                        (SELECT m2.sender_name
-                         FROM `" . MSG_TABLE . "` m2
-                         WHERE m2.sender_id = fm.sender_id
-                           AND m2.sender_name IS NOT NULL
-                           AND m2.sender_name <> ''
-                         LIMIT 1),
+                        sn.sender_name,
                         CONCAT('کاربر ', fm.sender_id)
                     ) AS sender_name,
                     fm.sender_id,
@@ -115,6 +107,14 @@ try {
              LEFT JOIN `" . MSG_TABLE . "` m
                     ON m.telegram_id = fm.telegram_id
                    AND m.chat_id     = fm.chat_id
+             LEFT JOIN (
+                 SELECT sender_id, MAX(sender_name) AS sender_name
+                 FROM `" . MSG_TABLE . "`
+                 WHERE sender_id IS NOT NULL
+                   AND sender_name IS NOT NULL
+                   AND sender_name <> ''
+                 GROUP BY sender_id
+             ) sn ON sn.sender_id = fm.sender_id
              WHERE fm.sender_id IS NOT NULL
              GROUP BY sender_name, fm.sender_id
              ORDER BY count DESC
@@ -126,27 +126,25 @@ try {
 
     /* =========================================================
        IRRELEVANT BY GROUP
-       ────────────────────────────────────────────────────────
-       اسم گروه با دو لایه fallback:
-       ۱) group_name خود پیام
-       ۲) از پیام دیگری با همان chat_id
-       ۳) "گروه {chat_id}"
     ========================================================= */
     $data['irrelevant_by_group'] = $pdo->query(
         "SELECT COALESCE(
-                    NULLIF(group_name, ''),
-                    (SELECT m2.group_name
-                     FROM `" . MSG_TABLE . "` m2
-                     WHERE m2.chat_id = t.chat_id
-                       AND m2.group_name IS NOT NULL
-                       AND m2.group_name <> ''
-                     LIMIT 1),
-                    CONCAT('گروه ', chat_id)
+                    NULLIF(t.group_name, ''),
+                    gn.group_name,
+                    CONCAT('گروه ', t.chat_id)
                 ) AS group_name,
                 COUNT(*) AS count
          FROM `" . MSG_TABLE . "` t
-         WHERE is_irrelevant = 1
-         GROUP BY group_name, chat_id
+         LEFT JOIN (
+             SELECT chat_id, MAX(group_name) AS group_name
+             FROM `" . MSG_TABLE . "`
+             WHERE chat_id IS NOT NULL
+               AND group_name IS NOT NULL
+               AND group_name <> ''
+             GROUP BY chat_id
+         ) gn ON gn.chat_id = t.chat_id
+         WHERE t.is_irrelevant = 1
+         GROUP BY group_name, t.chat_id
          ORDER BY count DESC
          LIMIT 10"
     )->fetchAll();
@@ -156,19 +154,22 @@ try {
     ========================================================= */
     $data['viewed_by_group'] = $pdo->query(
         "SELECT COALESCE(
-                    NULLIF(group_name, ''),
-                    (SELECT m2.group_name
-                     FROM `" . MSG_TABLE . "` m2
-                     WHERE m2.chat_id = t.chat_id
-                       AND m2.group_name IS NOT NULL
-                       AND m2.group_name <> ''
-                     LIMIT 1),
-                    CONCAT('گروه ', chat_id)
+                    NULLIF(t.group_name, ''),
+                    gn.group_name,
+                    CONCAT('گروه ', t.chat_id)
                 ) AS group_name,
                 COUNT(*) AS count
          FROM `" . MSG_TABLE . "` t
-         WHERE is_viewed = 1
-         GROUP BY group_name, chat_id
+         LEFT JOIN (
+             SELECT chat_id, MAX(group_name) AS group_name
+             FROM `" . MSG_TABLE . "`
+             WHERE chat_id IS NOT NULL
+               AND group_name IS NOT NULL
+               AND group_name <> ''
+             GROUP BY chat_id
+         ) gn ON gn.chat_id = t.chat_id
+         WHERE t.is_viewed = 1
+         GROUP BY group_name, t.chat_id
          ORDER BY count DESC
          LIMIT 10"
     )->fetchAll();
