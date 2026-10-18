@@ -9,7 +9,7 @@
 </div>
 
 <!-- ═══ Stats Cards ═══ -->
-<div class="stats-grid" id="statsGrid">
+<div class="stats-grid">
     <div class="stat-card">
         <div class="stat-icon blue"><i class="fas fa-comments"></i></div>
         <div>
@@ -58,11 +58,25 @@
 <section class="dashboard-section">
     <h2 class="section-title">
         <i class="fas fa-tags"></i>
-        تحلیل کلمات کلیدی
+        تحلیل کلمات کلیدی — گروه‌ها
         <span class="section-subtitle">به ازای هر کلمه — گروه‌های پرکاربردتر</span>
     </h2>
     <div id="keywordCharts" class="keyword-grid">
         <div class="skeleton" style="grid-column:1/-1">در حال بارگذاری...</div>
+    </div>
+</section>
+
+<!-- ═══ Top Senders ═══ -->
+<section class="dashboard-section">
+    <h2 class="section-title">
+        <i class="fas fa-user-tag" style="color:#7c3aed"></i>
+        فرستندگان پرکاربرد کلمات کلیدی
+        <span class="section-subtitle">top 15 — به ترتیب تعداد استفاده از کلمات کلیدی</span>
+    </h2>
+    <div class="table-wrap" style="padding:20px 22px">
+        <div id="topSendersChart" class="bar-list">
+            <div class="skeleton">در حال بارگذاری...</div>
+        </div>
     </div>
 </section>
 
@@ -80,7 +94,7 @@
     </div>
 </section>
 
-<!-- ═══ Viewed by Group (bonus) ═══ -->
+<!-- ═══ Viewed by Group ═══ -->
 <section class="dashboard-section">
     <h2 class="section-title">
         <i class="fas fa-check-circle" style="color:#10b981"></i>
@@ -94,7 +108,7 @@
     </div>
 </section>
 
-<!-- ═══ Daily Activity (bonus) ═══ -->
+<!-- ═══ Daily Activity ═══ -->
 <section class="dashboard-section">
     <h2 class="section-title">
         <i class="fas fa-chart-line"></i>
@@ -374,6 +388,18 @@
         background: linear-gradient(90deg, #10b981, #059669)
     }
 
+    .bar-fill.purple {
+        background: linear-gradient(90deg, #8b5cf6, #7c3aed)
+    }
+
+    /* ═══ Sender row meta ═══ */
+    .bar-meta {
+        font-size: .68rem;
+        color: #94a3b8;
+        font-weight: 600;
+        margin-right: 6px
+    }
+
     /* ═══ Daily activity ═══ */
     .daily-chart {
         display: flex;
@@ -472,7 +498,7 @@
         line-height: 1.6
     }
 
-    /* ═══ Skeleton / states ═══ */
+    /* ═══ States ═══ */
     .skeleton {
         color: #94a3b8;
         text-align: center;
@@ -577,7 +603,7 @@
 
         const fmt = n => Number(n || 0).toLocaleString('en-US');
 
-        /* ═══ stats cards ═══ */
+        /* ═══ stats ═══ */
         function renderStats(s) {
             document.getElementById('statTotal').textContent = fmt(s.total_messages);
             document.getElementById('statFiltered').textContent = fmt(s.filtered);
@@ -600,7 +626,6 @@
 
             container.innerHTML = keywords.map(k => {
                 const max = Math.max(...k.groups.map(g => g.count), 1);
-
                 const bars = k.groups.map(g => {
                     const pct = (g.count / max * 100).toFixed(0);
                     return `
@@ -612,8 +637,7 @@
                         <div class="bar-track">
                             <div class="bar-fill" style="width:${pct}%"></div>
                         </div>
-                    </div>
-                `;
+                    </div>`;
                 }).join('');
 
                 return `
@@ -623,12 +647,46 @@
                         <span class="keyword-total">${fmt(k.total)} پیام</span>
                     </div>
                     <div class="bar-list">${bars}</div>
-                </div>
-            `;
+                </div>`;
             }).join('');
         }
 
-        /* ═══ simple bar list (irrelevant / viewed) ═══ */
+        /* ═══ top senders ═══ */
+        function renderTopSenders(rows) {
+            const container = document.getElementById('topSendersChart');
+
+            if (!rows || !rows.length) {
+                container.innerHTML = '<div class="empty-state">داده‌ای موجود نیست</div>';
+                return;
+            }
+
+            const max = Math.max(...rows.map(r => r.count), 1);
+
+            container.innerHTML = rows.map(r => {
+                const pct = (r.count / max * 100).toFixed(0);
+                const kwInfo = r.keywords_used > 0 ?
+                    `<span class="bar-meta">${fmt(r.keywords_used)} کلمه</span>` :
+                    '';
+                return `
+                <div class="bar-item">
+                    <div class="bar-info">
+                        <span class="bar-label" title="${escapeHtml(r.sender_name)}">
+                            <i class="fas fa-user" style="font-size:.7rem;color:#8b5cf6;margin-left:4px"></i>
+                            ${escapeHtml(r.sender_name)}
+                        </span>
+                        <span>
+                            ${kwInfo}
+                            <span class="bar-value">${fmt(r.count)}</span>
+                        </span>
+                    </div>
+                    <div class="bar-track">
+                        <div class="bar-fill purple" style="width:${pct}%"></div>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        /* ═══ simple bar list ═══ */
         function renderBarList(containerId, rows, variant = '') {
             const container = document.getElementById(containerId);
 
@@ -650,12 +708,11 @@
                     <div class="bar-track">
                         <div class="bar-fill ${variant}" style="width:${pct}%"></div>
                     </div>
-                </div>
-            `;
+                </div>`;
             }).join('');
         }
 
-        /* ═══ daily chart ═══ */
+        /* ═══ daily ═══ */
         function renderDaily(rows) {
             const container = document.getElementById('dailyChart');
 
@@ -668,7 +725,7 @@
 
             container.innerHTML = rows.map(r => {
                 const pct = (r.count / max * 100).toFixed(0);
-                const label = (r.day || '').slice(5); // YYYY-MM-DD → MM-DD
+                const label = (r.day || '').slice(5);
                 return `
                 <div class="daily-bar">
                     <div class="daily-bar-value">${fmt(r.count)}</div>
@@ -676,8 +733,7 @@
                         <div class="daily-bar-fill" style="height:${pct}%"></div>
                     </div>
                     <div class="daily-bar-label">${escapeHtml(label)}</div>
-                </div>
-            `;
+                </div>`;
             }).join('');
         }
 
@@ -698,6 +754,7 @@
 
                     renderStats(data.stats || {});
                     renderKeywords(data.keywords || []);
+                    renderTopSenders(data.top_senders || []);
                     renderBarList('irrelevantChart', data.irrelevant_by_group || [], 'red');
                     renderBarList('viewedChart', data.viewed_by_group || [], 'green');
                     renderDaily(data.daily_activity || []);

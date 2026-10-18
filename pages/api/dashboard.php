@@ -14,7 +14,7 @@ try {
     $data = [];
 
     /* =========================================================
-       STATS — آمار کلی
+       STATS
     ========================================================= */
     $data['stats'] = [
         'total_messages' => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "`")->fetchColumn(),
@@ -24,8 +24,6 @@ try {
         'unique_senders' => (int)$pdo->query("SELECT COUNT(DISTINCT sender_name) FROM `" . MSG_TABLE . "` WHERE sender_name IS NOT NULL AND sender_name <> ''")->fetchColumn(),
         'total_clicks'   => (int)$pdo->query("SELECT COALESCE(SUM(click_count), 0) FROM `" . MSG_TABLE . "`")->fetchColumn(),
     ];
-
-    /* filtered count — graceful اگر جدول وجود نداشت */
     try {
         $data['stats']['filtered'] = (int)$pdo->query("SELECT COUNT(*) FROM `" . FM_TABLE . "`")->fetchColumn();
     } catch (Throwable $e) {
@@ -33,13 +31,27 @@ try {
     }
 
     /* =========================================================
-       KEYWORDS — به ازای هر کلمه، top groups
+       KEYWORDS → GROUPS
+       ────────────────────────────────────────────────────────
+       اسم گروه با سه لایه fallback:
+       ۱) m.group_name خود رکورد
+       ۲) اگر خالی بود، از پیام دیگری با همان chat_id
+       ۳) اگر هیچ‌کدام نبود، "گروه {chat_id}"
     ========================================================= */
     $keywords = [];
     try {
         $rows = $pdo->query(
             "SELECT fm.matched_keyword AS keyword,
-                    COALESCE(NULLIF(m.group_name, ''), CONCAT('chat:', fm.chat_id)) AS group_name,
+                    COALESCE(
+                        NULLIF(m.group_name, ''),
+                        (SELECT m2.group_name
+                         FROM `" . MSG_TABLE . "` m2
+                         WHERE m2.chat_id = fm.chat_id
+                           AND m2.group_name IS NOT NULL
+                           AND m2.group_name <> ''
+                         LIMIT 1),
+                        CONCAT('گروه ', fm.chat_id)
+                    ) AS group_name,
                     COUNT(*) AS count
              FROM `" . FM_TABLE . "` fm
              LEFT JOIN `" . MSG_TABLE . "` m
@@ -68,16 +80,42 @@ try {
         usort($keywords, fn($a, $b) => $b['total'] <=> $a['total']);
         $keywords = array_values($keywords);
     } catch (Throwable $e) {
-        // اگر filtered_messages وجود نداشت یا خطایی داد، خالی برمی‌گردانیم
         $keywords = [];
     }
     $data['keywords'] = $keywords;
 
     /* =========================================================
-       IRRELEVANT BY GROUP
+       TOP SENDERS — هر شخص چقدر از کلمات کلیدی استفاده کرده
+    ========================================================= */
+    try {
+        $data['top_senders'] = $pdo->query(
+            "SELECT COALESCE(
+                        NULLIF(m.sender_name, ''),
+                        CONCAT('کاربر ', fm.sender_id)
+                    ) AS sender_name,
+                    COUNT(*) AS count,
+                    COUNT(DISTINCT fm.matched_keyword) AS keywords_used
+             FROM `" . FM_TABLE . "` fm
+             LEFT JOIN `" . MSG_TABLE . "` m
+                    ON m.telegram_id = fm.telegram_id
+                   AND m.chat_id     = fm.chat_id
+             WHERE fm.sender_id IS NOT NULL
+             GROUP BY sender_name, fm.sender_id
+             ORDER BY count DESC
+             LIMIT 15"
+        )->fetchAll();
+    } catch (Throwable $e) {
+        $data['top_senders'] = [];
+    }
+
+    /* =========================================================
+       IRRELEVANT BY GROUP — با همان fallback گروه
     ========================================================= */
     $data['irrelevant_by_group'] = $pdo->query(
-        "SELECT COALESCE(NULLIF(group_name, ''), CONCAT('chat:', chat_id)) AS group_name,
+        "SELECT COALESCE(
+                    NULLIF(group_name, ''),
+                    CONCAT('گروه ', chat_id)
+                ) AS group_name,
                 COUNT(*) AS count
          FROM `" . MSG_TABLE . "`
          WHERE is_irrelevant = 1
@@ -90,7 +128,10 @@ try {
        VIEWED BY GROUP
     ========================================================= */
     $data['viewed_by_group'] = $pdo->query(
-        "SELECT COALESCE(NULLIF(group_name, ''), CONCAT('chat:', chat_id)) AS group_name,
+        "SELECT COALESCE(
+                    NULLIF(group_name, ''),
+                    CONCAT('گروه ', chat_id)
+                ) AS group_name,
                 COUNT(*) AS count
          FROM `" . MSG_TABLE . "`
          WHERE is_viewed = 1
@@ -100,7 +141,7 @@ try {
     )->fetchAll();
 
     /* =========================================================
-       DAILY ACTIVITY — ۱۴ روز اخیر
+       DAILY ACTIVITY
     ========================================================= */
     $daily = $pdo->query(
         "SELECT DATE(date_human) AS day, COUNT(*) AS count
