@@ -109,6 +109,76 @@ foreach ($files as $path) {
     }
 }
 
+/* ═══════════════════════════════════════════════════════════
+   سینک نام گروه‌ها و فرستندگان به جداول chats/senders
+   ═══════════════════════════════════════════════════════════
+   فقط اگر پیام جدیدی درج شد اجرا می‌شود (بهینه)
+   خطا در سینک باعث شکست worker نمی‌شود
+   ═══════════════════════════════════════════════════════════ */
+if ($processedRows > 0) {
+    try {
+        require_once __DIR__ . '/sync_names.php';
+
+        // ---- استخراج PDO از کلاس Database ----
+        $__syncPdo = null;
+
+        // ۱) روش‌های رایج
+        foreach (['getPdo', 'getInstance', 'getConnection', 'connection', 'pdo'] as $__m) {
+            if (method_exists('Database', $__m)) {
+                try {
+                    $__candidate = Database::$__m();
+                    if ($__candidate instanceof PDO) {
+                        $__syncPdo = $__candidate;
+                        break;
+                    }
+                } catch (Throwable $e) {
+                    // این متد جواب نداد، بعدی
+                }
+            }
+        }
+
+        // ۲) اگر پیدا نشد، از Reflection روی propertyهای static
+        if ($__syncPdo === null && class_exists('Database')) {
+            try {
+                $__ref = new ReflectionClass('Database');
+                foreach (['pdo', 'connection', 'db', 'instance', 'conn'] as $__prop) {
+                    if ($__ref->hasProperty($__prop)) {
+                        $__p = $__ref->getProperty($__prop);
+                        $__p->setAccessible(true);
+                        $__val = $__p->isStatic()
+                            ? $__p->getValue()
+                            : null;
+                        if ($__val instanceof PDO) {
+                            $__syncPdo = $__val;
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable $e) {
+                // نادیده بگیر
+            }
+        }
+
+        // ---- اجرای سینک ----
+        if ($__syncPdo instanceof PDO) {
+            $__syncResult = sync_names($__syncPdo);
+            Logger::info('سینک نام‌ها انجام شد', 'sync_names done', [
+                'chats'   => $__syncResult['chats']   ?? 0,
+                'senders' => $__syncResult['senders'] ?? 0,
+            ]);
+        } else {
+            Logger::warning(
+                'PDO برای سینک نام‌ها پیدا نشد — متد getPdo() را به کلاس Database اضافه کنید',
+                'PDO not accessible for sync_names — add getPdo() method to Database class'
+            );
+        }
+    } catch (Throwable $e) {
+        Logger::error('سینک نام‌ها شکست خورد', 'sync_names failed', [
+            'message' => $e->getMessage(),
+        ]);
+    }
+}
+
 Logger::info('ورکر پایان یافت', 'Worker finished', [
     'files_ok'   => $processedFiles,
     'rows_ok'    => $processedRows,

@@ -5,28 +5,39 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../db.php';
 
-const MSG_TABLE     = 'messages';
-const BLOCKED_TABLE = 'blocked_chats';
+const MSG_TABLE = 'messages';
+
+$action = $_GET['action'] ?? $_POST['action'] ?? 'list';
 
 try {
     $pdo = db();
+    switch ($action) {
+        case 'list':
+            handle_list($pdo);
+            break;
+        case 'increment_click':
+            handle_increment_click($pdo);
+            break;
+        case 'toggle_viewed':
+            handle_toggle_viewed($pdo);
+            break;
+        case 'toggle_irrelevant':
+            handle_toggle_irrelevant($pdo);
+            break;
+        default:
+            json_error('اکشن نامعتبر');
+    }
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo json_encode(['status' => 'error', 'message' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+}
 
-    $cols = $pdo->query("SHOW COLUMNS FROM `" . MSG_TABLE . "`")
-        ->fetchAll(PDO::FETCH_COLUMN);
-
-    $pick = function (array $cands) use ($cols): ?string {
-        foreach ($cands as $c) if (in_array($c, $cols, true)) return $c;
-        return null;
-    };
-
-    $COL_ID     = $pick(['id', 'message_id']);
-    $COL_TEXT   = $pick(['text', 'message', 'content', 'body', 'caption']);
-    $COL_SENDER = $pick(['sender_name', 'sender', 'from_name', 'username', 'first_name']);
-    $COL_GROUP  = $pick(['group_name', 'chat_title', 'group', 'chat_name']);
-    $COL_CHATID = $pick(['chat_id']);
-    $COL_DATE   = $pick(['date_human', 'created_at', 'date', 'sent_at', 'inserted_at']);
-    $COL_LINK   = $pick(['link', 'url', 'message_link', 'source_url', 'original_url', 'tg_link']);
-
+/* =========================================================
+   LIST
+========================================================= */
+function handle_list(PDO $pdo): void
+{
+    $tab     = $_GET['tab'] ?? 'all';
     $q       = trim((string)($_GET['q'] ?? ''));
     $page    = max(1, (int)($_GET['page'] ?? 1));
     $perPage = 15;
@@ -35,79 +46,146 @@ try {
     $where  = [];
     $params = [];
 
-    /* ⭐ زیرکوئری با ارجاع صریح به m.chat_id */
-    if ($COL_CHATID) {
-        $where[] = "NOT EXISTS (
-            SELECT 1 FROM `" . BLOCKED_TABLE . "` b
-            WHERE b.chat_id = m.`{$COL_CHATID}`
-        )";
+    if ($tab === 'viewed') {
+        $where[] = 'm.is_viewed = 1';
+    } elseif ($tab === 'irrelevant') {
+        $where[] = 'm.is_irrelevant = 1';
+    } else {
+        $where[] = 'm.is_viewed = 0 AND m.is_irrelevant = 0';
     }
 
-    /* ⭐ حلقه جستجو با placeholderهای یکتا */
     if ($q !== '') {
-        $searchable = array_values(array_filter([$COL_TEXT, $COL_SENDER, $COL_GROUP]));
-        if ($searchable) {
-            $parts = [];
-            $i = 0;
-            foreach ($searchable as $c) {
-                $i++;
-                $ph = ':q' . $i;                // :q1, :q2, :q3
-                $parts[] = "m.`$c` LIKE $ph";
-                $params[$ph] = "%{$q}%";
-            }
-            $where[] = '(' . implode(' OR ', $parts) . ')';
-        }
+        $where[] = '(
+            m.text LIKE :q1
+            OR COALESCE(s.sender_name, m.sender_name) LIKE :q2
+            OR COALESCE(c.group_name,  m.group_name)  LIKE :q3
+        )';
+        $params[':q1'] = "%{$q}%";
+        $params[':q2'] = "%{$q}%";
+        $params[':q3'] = "%{$q}%";
     }
 
-    $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+    $whereSql = 'WHERE ' . implode(' AND ', $where);
 
-    /* FROM با alias m */
-    $baseFrom = "FROM `" . MSG_TABLE . "` m";
+    /* JOIN با chats/senders */
+    $baseFrom = "FROM `" . MSG_TABLE . "` m
+                 LEFT JOIN `chats`   c ON c.chat_id   = m.chat_id
+                 LEFT JOIN `senders` s ON s.sender_id = m.sender_id";
 
-    /* ---- COUNT ---- */
     $stmt = $pdo->prepare("SELECT COUNT(*) {$baseFrom} {$whereSql}");
     $stmt->execute($params);
     $total = (int)$stmt->fetchColumn();
 
-    /* ---- DATA ---- */
-    $orderBy = $COL_ID ? "m.`$COL_ID` DESC" : '1';
     $stmt = $pdo->prepare(
-        "SELECT m.* {$baseFrom} {$whereSql} ORDER BY {$orderBy} LIMIT {$perPage} OFFSET {$offset}"
+        "SELECT m.id, m.chat_id, m.sender_id, m.text, m.link, m.date_human,
+                m.click_count, m.is_viewed, m.is_irrelevant,
+                COALESCE(NULLIF(s.sender_name, ''), m.sender_name, CONCAT('کاربر ', m.sender_id)) AS sender_name,
+                COALESCE(NULLIF(c.group_name, ''),  m.group_name,  CONCAT('گروه ',  m.chat_id))   AS group_name
+         {$baseFrom}
+         {$whereSql}
+         ORDER BY m.id DESC
+         LIMIT {$perPage} OFFSET {$offset}"
     );
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
 
-    $items = array_map(function (array $r) use ($COL_ID, $COL_TEXT, $COL_SENDER, $COL_GROUP, $COL_CHATID, $COL_DATE, $COL_LINK) {
-
-        $text = $COL_TEXT ? (string)($r[$COL_TEXT] ?? '') : '';
-        $link = null;
-
-        if ($COL_LINK && !empty($r[$COL_LINK]) && preg_match('~^https?://~i', (string)$r[$COL_LINK])) {
-            $link = (string)$r[$COL_LINK];
-        } elseif ($text && preg_match('~https?://\S+~i', $text, $m)) {
-            $link = rtrim($m[0], '.,!؟?،');
-        }
-
+    $items = array_map(static function (array $r): array {
         return [
-            'id'          => $COL_ID     ? ($r[$COL_ID]     ?? null) : null,
-            'sender_name' => $COL_SENDER ? ($r[$COL_SENDER] ?? '')   : '',
-            'group_name'  => $COL_GROUP  ? ($r[$COL_GROUP]  ?? '')   : '',
-            'chat_id'     => $COL_CHATID ? ($r[$COL_CHATID] ?? null) : null,
-            'text'        => $text,
-            'date'        => $COL_DATE   ? ($r[$COL_DATE]   ?? '')   : '',
-            'link'        => $link,
+            'id'            => (int)$r['id'],
+            'chat_id'       => $r['chat_id'],
+            'sender_name'   => (string)($r['sender_name'] ?? ''),
+            'group_name'    => (string)($r['group_name']  ?? ''),
+            'text'          => (string)($r['text'] ?? ''),
+            'link'          => $r['link'] ?: null,
+            'date_human'    => (string)($r['date_human'] ?? ''),
+            'click_count'   => (int)$r['click_count'],
+            'is_viewed'     => (int)$r['is_viewed'] === 1,
+            'is_irrelevant' => (int)$r['is_irrelevant'] === 1,
         ];
     }, $rows);
 
-    echo json_encode([
-        'status'   => 'success',
+    json_ok([
         'total'    => $total,
         'page'     => $page,
         'per_page' => $perPage,
         'pages'    => (int)ceil($total / $perPage),
         'items'    => $items,
-    ], JSON_UNESCAPED_UNICODE);
-} catch (Throwable $e) {
-    http_response_code(500);
-    echo json_encode(['status' => 'error', 'message' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        'counts'   => get_counts($pdo),
+    ]);
+}
+
+/* =========================================================
+   INCREMENT CLICK
+========================================================= */
+function handle_increment_click(PDO $pdo): void
+{
+    $id = (int)($_POST['id'] ?? 0);
+    if ($id <= 0) json_error('شناسه نامعتبر');
+
+    $pdo->prepare("UPDATE `" . MSG_TABLE . "` SET click_count = click_count + 1 WHERE id = ?")
+        ->execute([$id]);
+
+    $stmt = $pdo->prepare("SELECT click_count FROM `" . MSG_TABLE . "` WHERE id = ?");
+    $stmt->execute([$id]);
+
+    json_ok(['click_count' => (int)$stmt->fetchColumn()]);
+}
+
+/* =========================================================
+   TOGGLE VIEWED
+========================================================= */
+function handle_toggle_viewed(PDO $pdo): void
+{
+    $id = (int)($_POST['id'] ?? 0);
+    if ($id <= 0) json_error('شناسه نامعتبر');
+
+    $pdo->prepare("UPDATE `" . MSG_TABLE . "` SET is_viewed = IF(is_viewed = 1, 0, 1) WHERE id = ?")
+        ->execute([$id]);
+
+    $stmt = $pdo->prepare("SELECT is_viewed FROM `" . MSG_TABLE . "` WHERE id = ?");
+    $stmt->execute([$id]);
+
+    json_ok(['is_viewed' => (int)$stmt->fetchColumn() === 1, 'counts' => get_counts($pdo)]);
+}
+
+/* =========================================================
+   TOGGLE IRRELEVANT
+========================================================= */
+function handle_toggle_irrelevant(PDO $pdo): void
+{
+    $id = (int)($_POST['id'] ?? 0);
+    if ($id <= 0) json_error('شناسه نامعتبر');
+
+    $pdo->prepare("UPDATE `" . MSG_TABLE . "` SET is_irrelevant = IF(is_irrelevant = 1, 0, 1) WHERE id = ?")
+        ->execute([$id]);
+
+    $stmt = $pdo->prepare("SELECT is_irrelevant FROM `" . MSG_TABLE . "` WHERE id = ?");
+    $stmt->execute([$id]);
+
+    json_ok(['is_irrelevant' => (int)$stmt->fetchColumn() === 1, 'counts' => get_counts($pdo)]);
+}
+
+/* =========================================================
+   HELPERS
+========================================================= */
+function get_counts(PDO $pdo): array
+{
+    return [
+        'all'        => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 0 AND is_irrelevant = 0")->fetchColumn(),
+        'viewed'     => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 1")->fetchColumn(),
+        'irrelevant' => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_irrelevant = 1")->fetchColumn(),
+    ];
+}
+
+function json_ok(array $data): void
+{
+    echo json_encode(['status' => 'success'] + $data, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+function json_error(string $msg, int $code = 400): void
+{
+    http_response_code($code);
+    echo json_encode(['status' => 'error', 'message' => $msg], JSON_UNESCAPED_UNICODE);
+    exit;
 }

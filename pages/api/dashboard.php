@@ -22,8 +22,8 @@ try {
         'total_messages' => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "`")->fetchColumn(),
         'viewed'         => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 1")->fetchColumn(),
         'irrelevant'     => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_irrelevant = 1")->fetchColumn(),
-        'unique_groups'  => (int)$pdo->query("SELECT COUNT(DISTINCT group_name) FROM `" . MSG_TABLE . "` WHERE group_name IS NOT NULL AND group_name <> ''")->fetchColumn(),
-        'unique_senders' => (int)$pdo->query("SELECT COUNT(DISTINCT sender_name) FROM `" . MSG_TABLE . "` WHERE sender_name IS NOT NULL AND sender_name <> ''")->fetchColumn(),
+        'unique_groups'  => (int)$pdo->query("SELECT COUNT(*) FROM `chats`")->fetchColumn(),
+        'unique_senders' => (int)$pdo->query("SELECT COUNT(*) FROM `senders`")->fetchColumn(),
         'total_clicks'   => (int)$pdo->query("SELECT COALESCE(SUM(click_count), 0) FROM `" . MSG_TABLE . "`")->fetchColumn(),
     ];
     try {
@@ -33,70 +33,40 @@ try {
     }
 
     /* =========================================================
-       GROUP MAP — نگاشت chat_id → group_name
-    ========================================================= */
-    $groupMap = [];
-    foreach (
-        $pdo->query(
-            "SELECT chat_id, MAX(group_name) AS group_name
-         FROM `" . MSG_TABLE . "`
-         WHERE chat_id IS NOT NULL
-           AND group_name IS NOT NULL
-           AND group_name <> ''
-         GROUP BY chat_id"
-        ) as $r
-    ) {
-        $groupMap[(string)$r['chat_id']] = $r['group_name'];
-    }
-
-    $resolveGroup = function ($chatId, $fallbackName = '') use ($groupMap) {
-        if (!empty($fallbackName)) return $fallbackName;
-        $k = (string)$chatId;
-        if (isset($groupMap[$k])) return $groupMap[$k];
-        return 'گروه ' . $chatId;
-    };
-
-    /* =========================================================
        KEYWORDS → GROUPS
+       ────────────────────────────────────────────────────────
+       JOIN با chats (نه با messages) — پس حذف پیام تأثیری ندارد
     ========================================================= */
     $keywords = [];
     try {
         $rows = $pdo->query(
             "SELECT fm.matched_keyword AS keyword,
-                    fm.chat_id,
-                    NULLIF(m.group_name, '') AS group_name,
+                    COALESCE(
+                        c.group_name,
+                        CONCAT('گروه ', fm.chat_id)
+                    ) AS group_name,
                     COUNT(*) AS count
              FROM `" . FM_TABLE . "` fm
-             LEFT JOIN `" . MSG_TABLE . "` m
-                    ON (m.telegram_id = fm.telegram_id AND m.chat_id = fm.chat_id)
-                    OR (m.chat_id = fm.chat_id AND m.id = fm.message_id)
-             GROUP BY fm.matched_keyword, fm.chat_id, group_name"
+             LEFT JOIN `chats` c ON c.chat_id = fm.chat_id
+             GROUP BY fm.matched_keyword, group_name
+             ORDER BY fm.matched_keyword ASC, count DESC"
         )->fetchAll();
 
         foreach ($rows as $r) {
-            $kw  = $r['keyword'];
-            $g   = $resolveGroup($r['chat_id'], $r['group_name'] ?? '');
+            $kw = $r['keyword'];
             if (!isset($keywords[$kw])) {
                 $keywords[$kw] = ['keyword' => $kw, 'total' => 0, 'groups' => []];
             }
-            if (!isset($keywords[$kw]['groups'][$g])) {
-                $keywords[$kw]['groups'][$g] = 0;
-            }
-            $keywords[$kw]['groups'][$g]  += (int)$r['count'];
-            $keywords[$kw]['total']       += (int)$r['count'];
+            $keywords[$kw]['total'] += (int)$r['count'];
+            $keywords[$kw]['groups'][] = [
+                'group_name' => $r['group_name'],
+                'count'      => (int)$r['count'],
+            ];
         }
 
         foreach ($keywords as &$k) {
-            arsort($k['groups']);
-            $k['groups'] = array_slice(
-                array_map(
-                    fn($name, $cnt) => ['group_name' => $name, 'count' => $cnt],
-                    array_keys($k['groups']),
-                    array_values($k['groups'])
-                ),
-                0,
-                5
-            );
+            usort($k['groups'], fn($a, $b) => $b['count'] <=> $a['count']);
+            $k['groups'] = array_slice($k['groups'], 0, 5);
         }
         unset($k);
 
@@ -108,108 +78,70 @@ try {
     $data['keywords'] = $keywords;
 
     /* =========================================================
-       TOP SENDERS — با نگاشت sender_id → sender_name
+       TOP SENDERS — JOIN با senders
     ========================================================= */
-    $senderMap = [];
-    foreach (
-        $pdo->query(
-            "SELECT sender_id, MAX(sender_name) AS sender_name
-         FROM `" . MSG_TABLE . "`
-         WHERE sender_id IS NOT NULL
-           AND sender_name IS NOT NULL
-           AND sender_name <> ''
-         GROUP BY sender_id"
-        ) as $r
-    ) {
-        $senderMap[(string)$r['sender_id']] = $r['sender_name'];
-    }
-
     try {
-        $rows = $pdo->query(
-            "SELECT fm.sender_id,
-                    NULLIF(m.sender_name, '') AS sender_name,
+        $data['top_senders'] = $pdo->query(
+            "SELECT COALESCE(
+                        s.sender_name,
+                        CONCAT('کاربر ', fm.sender_id)
+                    ) AS sender_name,
+                    fm.sender_id,
                     COUNT(*) AS count,
                     COUNT(DISTINCT fm.matched_keyword) AS keywords_used
              FROM `" . FM_TABLE . "` fm
-             LEFT JOIN `" . MSG_TABLE . "` m
-                    ON (m.telegram_id = fm.telegram_id AND m.chat_id = fm.chat_id)
-                    OR (m.chat_id = fm.chat_id AND m.id = fm.message_id)
+             LEFT JOIN `senders` s ON s.sender_id = fm.sender_id
              WHERE fm.sender_id IS NOT NULL
-             GROUP BY fm.sender_id, sender_name"
+             GROUP BY sender_name, fm.sender_id
+             ORDER BY count DESC
+             LIMIT 15"
         )->fetchAll();
-
-        $bySender = [];
-        foreach ($rows as $r) {
-            $sid  = (string)$r['sender_id'];
-            $name = $r['sender_name'] ?: ($senderMap[$sid] ?? ('کاربر ' . $sid));
-            if (!isset($bySender[$sid])) {
-                $bySender[$sid] = [
-                    'sender_name'   => $name,
-                    'count'         => 0,
-                    'keywords_used' => 0,
-                ];
-            }
-            $bySender[$sid]['count'] += (int)$r['count'];
-            $bySender[$sid]['keywords_used'] = max(
-                $bySender[$sid]['keywords_used'],
-                (int)$r['keywords_used']
-            );
-        }
-
-        $senders = array_values($bySender);
-        usort($senders, fn($a, $b) => $b['count'] <=> $a['count']);
-        $data['top_senders'] = array_slice($senders, 0, 15);
     } catch (Throwable $e) {
         $data['top_senders'] = [];
     }
 
     /* =========================================================
-       IRRELEVANT BY GROUP — از هر دو منبع (جدید + قدیمی)
+       IRRELEVANT BY GROUP
        ────────────────────────────────────────────────────────
-       جدید: messages.is_irrelevant = 1
-       قدیمی: irrelevant_messages → filtered_messages
-       نتیجه با chat_id یکی می‌شوند و sum می‌شوند (با DISTINCT)
+       جدید: messages.is_irrelevant = 1 → JOIN chats
+       قدیمی: irrelevant_messages → filtered_messages → chats
     ========================================================= */
     $irrelevantByGroup = [];
     try {
-        // ---- منبع جدید ----
+        // منبع جدید
         foreach (
             $pdo->query(
-                "SELECT chat_id, group_name, COUNT(*) AS count
-             FROM `" . MSG_TABLE . "`
-             WHERE is_irrelevant = 1
-             GROUP BY chat_id, group_name"
+                "SELECT COALESCE(c.group_name, CONCAT('گروه ', t.chat_id)) AS group_name,
+                    COUNT(*) AS count
+             FROM `" . MSG_TABLE . "` t
+             LEFT JOIN `chats` c ON c.chat_id = t.chat_id
+             WHERE t.is_irrelevant = 1
+             GROUP BY group_name"
             ) as $r
         ) {
-            $g = $resolveGroup($r['chat_id'], $r['group_name'] ?? '');
+            $g = $r['group_name'];
             $irrelevantByGroup[$g] = ($irrelevantByGroup[$g] ?? 0) + (int)$r['count'];
         }
 
-        // ---- منبع قدیمی (اگر جدول وجود داشت) ----
+        // منبع قدیمی
         foreach (
             $pdo->query(
-                "SELECT fm.id AS fm_id, fm.chat_id,
-                    NULLIF(m.group_name, '') AS group_name,
-                    COUNT(DISTINCT im.id) AS count
+                "SELECT fm.id AS fm_id,
+                    COALESCE(c.group_name, CONCAT('گروه ', fm.chat_id)) AS group_name
              FROM `" . FM_TABLE . "` fm
-             INNER JOIN `" . IM_TABLE . "` im
-                     ON im.filtered_message_id = fm.id
-             LEFT JOIN `" . MSG_TABLE . "` m
-                    ON (m.telegram_id = fm.telegram_id AND m.chat_id = fm.chat_id)
-                    OR (m.chat_id = fm.chat_id AND m.id = fm.message_id)
-             GROUP BY fm.id, fm.chat_id, group_name"
+             INNER JOIN `" . IM_TABLE . "` im ON im.filtered_message_id = fm.id
+             LEFT JOIN `chats` c ON c.chat_id = fm.chat_id"
             ) as $r
         ) {
-            $g = $resolveGroup($r['chat_id'], $r['group_name'] ?? '');
-            $irrelevantByGroup[$g] = ($irrelevantByGroup[$g] ?? 0) + (int)$r['count'];
+            $g = $r['group_name'];
+            $irrelevantByGroup[$g] = ($irrelevantByGroup[$g] ?? 0) + 1;
         }
     } catch (Throwable $e) {
-        // نادیده بگیر
     }
     arsort($irrelevantByGroup);
     $data['irrelevant_by_group'] = array_slice(
         array_map(
-            fn($name, $cnt) => ['group_name' => $name, 'count' => $cnt],
+            fn($n, $c) => ['group_name' => $n, 'count' => $c],
             array_keys($irrelevantByGroup),
             array_values($irrelevantByGroup)
         ),
@@ -218,46 +150,42 @@ try {
     );
 
     /* =========================================================
-       VIEWED BY GROUP — از هر دو منبع
+       VIEWED BY GROUP
     ========================================================= */
     $viewedByGroup = [];
     try {
         foreach (
             $pdo->query(
-                "SELECT chat_id, group_name, COUNT(*) AS count
-             FROM `" . MSG_TABLE . "`
-             WHERE is_viewed = 1
-             GROUP BY chat_id, group_name"
+                "SELECT COALESCE(c.group_name, CONCAT('گروه ', t.chat_id)) AS group_name,
+                    COUNT(*) AS count
+             FROM `" . MSG_TABLE . "` t
+             LEFT JOIN `chats` c ON c.chat_id = t.chat_id
+             WHERE t.is_viewed = 1
+             GROUP BY group_name"
             ) as $r
         ) {
-            $g = $resolveGroup($r['chat_id'], $r['group_name'] ?? '');
+            $g = $r['group_name'];
             $viewedByGroup[$g] = ($viewedByGroup[$g] ?? 0) + (int)$r['count'];
         }
 
         foreach (
             $pdo->query(
-                "SELECT fm.id AS fm_id, fm.chat_id,
-                    NULLIF(m.group_name, '') AS group_name,
-                    COUNT(DISTINCT vm.id) AS count
+                "SELECT fm.id AS fm_id,
+                    COALESCE(c.group_name, CONCAT('گروه ', fm.chat_id)) AS group_name
              FROM `" . FM_TABLE . "` fm
-             INNER JOIN `" . VM_TABLE . "` vm
-                     ON vm.filtered_message_id = fm.id
-             LEFT JOIN `" . MSG_TABLE . "` m
-                    ON (m.telegram_id = fm.telegram_id AND m.chat_id = fm.chat_id)
-                    OR (m.chat_id = fm.chat_id AND m.id = fm.message_id)
-             GROUP BY fm.id, fm.chat_id, group_name"
+             INNER JOIN `" . VM_TABLE . "` vm ON vm.filtered_message_id = fm.id
+             LEFT JOIN `chats` c ON c.chat_id = fm.chat_id"
             ) as $r
         ) {
-            $g = $resolveGroup($r['chat_id'], $r['group_name'] ?? '');
-            $viewedByGroup[$g] = ($viewedByGroup[$g] ?? 0) + (int)$r['count'];
+            $g = $r['group_name'];
+            $viewedByGroup[$g] = ($viewedByGroup[$g] ?? 0) + 1;
         }
     } catch (Throwable $e) {
-        // نادیده بگیر
     }
     arsort($viewedByGroup);
     $data['viewed_by_group'] = array_slice(
         array_map(
-            fn($name, $cnt) => ['group_name' => $name, 'count' => $cnt],
+            fn($n, $c) => ['group_name' => $n, 'count' => $c],
             array_keys($viewedByGroup),
             array_values($viewedByGroup)
         ),
