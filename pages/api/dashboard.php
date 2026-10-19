@@ -10,14 +10,114 @@ const FM_TABLE  = 'filtered_messages';
 const IM_TABLE  = 'irrelevant_messages';
 const VM_TABLE  = 'viewed_messages';
 
+$action = $_GET['action'] ?? 'full';
+
 try {
     $pdo = db();
 
+    if ($action === 'trend') {
+        handle_trend($pdo);
+    } else {
+        handle_full($pdo);
+    }
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo json_encode(['status' => 'error', 'message' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+}
+
+/* =========================================================
+   TREND — پیشرفت کلمات کلیدی در زمان
+========================================================= */
+function handle_trend(PDO $pdo): void
+{
+    $range = $_GET['range'] ?? 'week';
+    $data  = build_trend($pdo, $range);
+
+    json_ok(['range' => $range, 'trend' => $data]);
+}
+
+/**
+ * بر اساس بازه، آرایه‌ی { bucket, count } برمی‌گرداند.
+ * - 2days/week/month → سطری روزانه
+ * - year → سطری ماهانه (۱۲ ماه اخیر)
+ */
+function build_trend(PDO $pdo, string $range): array
+{
+    $ranges = [
+        '2days' => ['days' => 2,   'group' => 'day'],
+        'week'  => ['days' => 7,   'group' => 'day'],
+        'month' => ['days' => 30,  'group' => 'day'],
+        'year'  => ['days' => 365, 'group' => 'month'],
+    ];
+    $cfg  = $ranges[$range] ?? $ranges['week'];
+    $days = $cfg['days'];
+
+    if ($cfg['group'] === 'month') {
+        // ── بازه سالانه: ۱۲ ماه اخیر ──
+        $stmt = $pdo->prepare(
+            "SELECT DATE_FORMAT(DATE(FROM_UNIXTIME(date)), '%Y-%m') AS bucket,
+                    COUNT(*) AS count
+             FROM `" . FM_TABLE . "`
+             WHERE date >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 365 DAY))
+             GROUP BY bucket
+             ORDER BY bucket ASC"
+        );
+        $stmt->execute();
+        $rows = $stmt->fetchAll();
+
+        $byBucket = [];
+        foreach ($rows as $r) {
+            $byBucket[$r['bucket']] = (int)$r['count'];
+        }
+
+        $result = [];
+        for ($i = 11; $i >= 0; $i--) {
+            $d = date('Y-m', strtotime("-{$i} months"));
+            $result[] = [
+                'bucket' => $d,
+                'count'  => $byBucket[$d] ?? 0,
+            ];
+        }
+        return $result;
+    }
+
+    // ── بازه‌های روزانه ──
+    $stmt = $pdo->prepare(
+        "SELECT DATE(FROM_UNIXTIME(date)) AS bucket,
+                COUNT(*) AS count
+         FROM `" . FM_TABLE . "`
+         WHERE date >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL :days DAY))
+         GROUP BY bucket
+         ORDER BY bucket ASC"
+    );
+    $stmt->bindValue(':days', $days, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+
+    $byBucket = [];
+    foreach ($rows as $r) {
+        $byBucket[$r['bucket']] = (int)$r['count'];
+    }
+
+    $result = [];
+    for ($i = $days - 1; $i >= 0; $i--) {
+        $d = date('Y-m-d', strtotime("-{$i} days"));
+        $result[] = [
+            'bucket' => $d,
+            'count'  => $byBucket[$d] ?? 0,
+        ];
+    }
+    return $result;
+}
+
+/* =========================================================
+   FULL — همه تحلیل‌ها
+========================================================= */
+function handle_full(PDO $pdo): void
+{
     $data = [];
 
-    /* =========================================================
-       STATS
-    ========================================================= */
+    /* ═══ STATS ═══ */
     $data['stats'] = [
         'total_messages' => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "`")->fetchColumn(),
         'viewed'         => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 1")->fetchColumn(),
@@ -32,11 +132,7 @@ try {
         $data['stats']['filtered'] = 0;
     }
 
-    /* =========================================================
-       KEYWORDS → GROUPS
-       ────────────────────────────────────────────────────────
-       JOIN با chats (نه با messages) — پس حذف پیام تأثیری ندارد
-    ========================================================= */
+    /* ═══ KEYWORDS ═══ */
     $keywords = [];
     try {
         $rows = $pdo->query(
@@ -77,9 +173,7 @@ try {
     }
     $data['keywords'] = $keywords;
 
-    /* =========================================================
-       TOP SENDERS — JOIN با senders
-    ========================================================= */
+    /* ═══ TOP SENDERS ═══ */
     try {
         $data['top_senders'] = $pdo->query(
             "SELECT COALESCE(
@@ -100,15 +194,9 @@ try {
         $data['top_senders'] = [];
     }
 
-    /* =========================================================
-       IRRELEVANT BY GROUP
-       ────────────────────────────────────────────────────────
-       جدید: messages.is_irrelevant = 1 → JOIN chats
-       قدیمی: irrelevant_messages → filtered_messages → chats
-    ========================================================= */
+    /* ═══ IRRELEVANT BY GROUP ═══ */
     $irrelevantByGroup = [];
     try {
-        // منبع جدید
         foreach (
             $pdo->query(
                 "SELECT COALESCE(c.group_name, CONCAT('گروه ', t.chat_id)) AS group_name,
@@ -123,11 +211,9 @@ try {
             $irrelevantByGroup[$g] = ($irrelevantByGroup[$g] ?? 0) + (int)$r['count'];
         }
 
-        // منبع قدیمی
         foreach (
             $pdo->query(
-                "SELECT fm.id AS fm_id,
-                    COALESCE(c.group_name, CONCAT('گروه ', fm.chat_id)) AS group_name
+                "SELECT COALESCE(c.group_name, CONCAT('گروه ', fm.chat_id)) AS group_name
              FROM `" . FM_TABLE . "` fm
              INNER JOIN `" . IM_TABLE . "` im ON im.filtered_message_id = fm.id
              LEFT JOIN `chats` c ON c.chat_id = fm.chat_id"
@@ -149,9 +235,7 @@ try {
         10
     );
 
-    /* =========================================================
-       VIEWED BY GROUP
-    ========================================================= */
+    /* ═══ VIEWED BY GROUP ═══ */
     $viewedByGroup = [];
     try {
         foreach (
@@ -170,8 +254,7 @@ try {
 
         foreach (
             $pdo->query(
-                "SELECT fm.id AS fm_id,
-                    COALESCE(c.group_name, CONCAT('گروه ', fm.chat_id)) AS group_name
+                "SELECT COALESCE(c.group_name, CONCAT('گروه ', fm.chat_id)) AS group_name
              FROM `" . FM_TABLE . "` fm
              INNER JOIN `" . VM_TABLE . "` vm ON vm.filtered_message_id = fm.id
              LEFT JOIN `chats` c ON c.chat_id = fm.chat_id"
@@ -193,9 +276,7 @@ try {
         10
     );
 
-    /* =========================================================
-       DAILY ACTIVITY
-    ========================================================= */
+    /* ═══ DAILY ACTIVITY (۱۴ روز) ═══ */
     $daily = $pdo->query(
         "SELECT DATE(date_human) AS day, COUNT(*) AS count
          FROM `" . MSG_TABLE . "`
@@ -206,8 +287,17 @@ try {
     )->fetchAll();
     $data['daily_activity'] = array_reverse($daily);
 
+    /* ═══ TREND (پیش‌فرض: ماه اخیر) ═══ */
+    $data['trend'] = build_trend($pdo, 'month');
+
+    json_ok($data);
+}
+
+/* =========================================================
+   HELPERS
+========================================================= */
+function json_ok(array $data): void
+{
     echo json_encode(['status' => 'success'] + $data, JSON_UNESCAPED_UNICODE);
-} catch (Throwable $e) {
-    http_response_code(500);
-    echo json_encode(['status' => 'error', 'message' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+    exit;
 }
