@@ -26,9 +26,6 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../db.php';
 
-/* ═══════════════════════════════════════════════════════════
-   مسیر ریشه
-   ═══════════════════════════════════════════════════════════ */
 $root = dirname(__DIR__, 2);
 
 /* ═══════════════════════════════════════════════════════════
@@ -37,12 +34,14 @@ $root = dirname(__DIR__, 2);
 $job = strtolower((string)($_GET['job'] ?? $_POST['job'] ?? 'all'));
 
 $map = [
-    'worker' => [['name' => 'worker', 'file' => $root . '/worker.php']],
-    'filter' => [['name' => 'filter', 'file' => $root . '/filter.php']],
-    'all'    => [
+    'worker'      => [['name' => 'worker', 'file' => $root . '/worker.php']],
+    'filter'      => [['name' => 'filter', 'file' => $root . '/filter.php']],
+    'all'         => [
         ['name' => 'worker', 'file' => $root . '/worker.php'],
         ['name' => 'filter', 'file' => $root . '/filter.php'],
     ],
+    /* ⭐ جدید: فیلتر + سینک نام‌ها */
+    'filter_sync' => [['name' => 'filter', 'file' => $root . '/filter.php']],
 ];
 
 if (!isset($map[$job])) {
@@ -246,15 +245,17 @@ foreach ($jobs as $j) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   سینک نام‌ها — بعد از worker (چه از UI چه دستی)
+   سینک نام‌ها — بعد از filter / worker / all / filter_sync
    ═══════════════════════════════════════════════════════════ */
 $syncInfo = null;
-if ($overallOk && in_array($job, ['worker', 'all'], true)) {
+if ($overallOk && in_array($job, ['worker', 'all', 'filter_sync'], true)) {
     try {
         $syncFile = $root . '/sync_names.php';
         if (is_file($syncFile)) {
             require_once $syncFile;
             $syncInfo = sync_names(db());
+        } else {
+            $syncInfo = ['error' => 'sync_names.php یافت نشد'];
         }
     } catch (Throwable $e) {
         $syncInfo = ['error' => $e->getMessage()];

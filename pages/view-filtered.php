@@ -317,8 +317,7 @@
         const refreshLbl = document.getElementById('refreshLabel');
 
         const ENDPOINT = 'api/filtered.php';
-        const REFRESH_EP = 'api/refresh.php?job=all';
-
+        const REFRESH_EP = 'api/refresh.php?job=filter_sync';
         const state = {
             tab: 'all',
             q: '',
@@ -512,7 +511,12 @@
                 .then(r => r.json())
                 .then(d => {
                     if (d.status === 'success') {
-                        toast('به‌روزرسانی با موفقیت انجام شد', 'success');
+                        const syncInfo = d.sync || {};
+                        let msg = 'فیلتر پیام‌ها انجام شد';
+                        if (syncInfo.chats || syncInfo.senders) {
+                            msg += ` — ${syncInfo.chats || 0} گروه، ${syncInfo.senders || 0} فرستنده به‌روز شد`;
+                        }
+                        toast(msg, 'success');
                     } else {
                         const failed = (d.results || []).find(x => x.status === 'error');
                         toast(failed?.message || d.message || 'خطا در اجرای به‌روزرسانی', 'error');
