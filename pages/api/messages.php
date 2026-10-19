@@ -5,7 +5,8 @@ header('Content-Type: application/json; charset=utf-8');
 
 require __DIR__ . '/../db.php';
 
-const MSG_TABLE = 'messages';
+const MSG_TABLE     = 'messages';
+const BLOCKED_TABLE = 'blocked_chats';
 
 $action = $_GET['action'] ?? $_POST['action'] ?? 'list';
 
@@ -54,6 +55,9 @@ function handle_list(PDO $pdo): void
         $where[] = 'm.is_viewed = 0 AND m.is_irrelevant = 0';
     }
 
+    /* ⭐ حذف چت‌های مسدود — NOT EXISTS */
+    $where[] = 'NOT EXISTS (SELECT 1 FROM `' . BLOCKED_TABLE . '` b WHERE b.chat_id = m.chat_id)';
+
     if ($q !== '') {
         $where[] = '(
             m.text LIKE :q1
@@ -67,7 +71,6 @@ function handle_list(PDO $pdo): void
 
     $whereSql = 'WHERE ' . implode(' AND ', $where);
 
-    /* JOIN با chats/senders */
     $baseFrom = "FROM `" . MSG_TABLE . "` m
                  LEFT JOIN `chats`   c ON c.chat_id   = m.chat_id
                  LEFT JOIN `senders` s ON s.sender_id = m.sender_id";
@@ -170,10 +173,19 @@ function handle_toggle_irrelevant(PDO $pdo): void
 ========================================================= */
 function get_counts(PDO $pdo): array
 {
+    $blockedSub = "NOT EXISTS (SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = `" . MSG_TABLE . "`.chat_id)";
+
     return [
-        'all'        => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 0 AND is_irrelevant = 0")->fetchColumn(),
-        'viewed'     => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 1")->fetchColumn(),
-        'irrelevant' => (int)$pdo->query("SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_irrelevant = 1")->fetchColumn(),
+        'all'        => (int)$pdo->query(
+            "SELECT COUNT(*) FROM `" . MSG_TABLE . "`
+             WHERE is_viewed = 0 AND is_irrelevant = 0 AND {$blockedSub}"
+        )->fetchColumn(),
+        'viewed'     => (int)$pdo->query(
+            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 1 AND {$blockedSub}"
+        )->fetchColumn(),
+        'irrelevant' => (int)$pdo->query(
+            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_irrelevant = 1 AND {$blockedSub}"
+        )->fetchColumn(),
     ];
 }
 
