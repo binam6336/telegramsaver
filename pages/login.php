@@ -232,7 +232,7 @@ $userHtml = htmlspecialchars($username, ENT_QUOTES);
     <div class="login-box">
         <div class="login-logo">
             <div class="login-logo-icon"><i class="fas fa-paper-plane"></i></div>
-            <h1>پنل مدیریت ماهیار</h1>
+            <h1>پنل مدیریت تلگرام</h1>
             <p>لطفاً وارد حساب خود شوید</p>
         </div>
 
