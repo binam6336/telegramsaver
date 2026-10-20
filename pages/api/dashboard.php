@@ -103,19 +103,20 @@ function handle_full(PDO $pdo): void
 {
     $data = [];
 
-    $nbMsg = "NOT EXISTS (SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = `" . MSG_TABLE . "`.chat_id)";
+    /* ⭐ همه کوئری‌های messages با alias m — و زیرکوئری هم m.chat_id */
+    $nbMsg = "NOT EXISTS (SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = m.chat_id)";
     $nbFm  = "NOT EXISTS (SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = fm.chat_id)";
 
     /* ═══ STATS ═══ */
     $data['stats'] = [
         'total_messages' => (int)$pdo->query(
-            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE {$nbMsg}"
+            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` m WHERE {$nbMsg}"
         )->fetchColumn(),
         'viewed'         => (int)$pdo->query(
-            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_viewed = 1 AND {$nbMsg}"
+            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` m WHERE m.is_viewed = 1 AND {$nbMsg}"
         )->fetchColumn(),
         'irrelevant'     => (int)$pdo->query(
-            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` WHERE is_irrelevant = 1 AND {$nbMsg}"
+            "SELECT COUNT(*) FROM `" . MSG_TABLE . "` m WHERE m.is_irrelevant = 1 AND {$nbMsg}"
         )->fetchColumn(),
         'unique_groups'  => (int)$pdo->query(
             "SELECT COUNT(*) FROM `chats`
@@ -126,7 +127,7 @@ function handle_full(PDO $pdo): void
              WHERE m.sender_id IS NOT NULL AND {$nbMsg}"
         )->fetchColumn(),
         'total_clicks'   => (int)$pdo->query(
-            "SELECT COALESCE(SUM(click_count), 0) FROM `" . MSG_TABLE . "` WHERE {$nbMsg}"
+            "SELECT COALESCE(SUM(m.click_count), 0) FROM `" . MSG_TABLE . "` m WHERE {$nbMsg}"
         )->fetchColumn(),
     ];
     try {
@@ -137,7 +138,7 @@ function handle_full(PDO $pdo): void
         $data['stats']['filtered'] = 0;
     }
 
-    /* ═══ KEYWORDS ═══ */
+    /* ═══ KEYWORDS → GROUPS ═══ */
     $keywords = [];
     try {
         $rows = $pdo->query(
@@ -281,11 +282,11 @@ function handle_full(PDO $pdo): void
 
     /* ═══ DAILY ═══ */
     $daily = $pdo->query(
-        "SELECT DATE(date_human) AS day, COUNT(*) AS count
+        "SELECT DATE(t.date_human) AS day, COUNT(*) AS count
          FROM `" . MSG_TABLE . "` t
-         WHERE date_human IS NOT NULL
+         WHERE t.date_human IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM `" . BLOCKED_TABLE . "` b WHERE b.chat_id = t.chat_id)
-         GROUP BY DATE(date_human)
+         GROUP BY DATE(t.date_human)
          ORDER BY day DESC
          LIMIT 14"
     )->fetchAll();
