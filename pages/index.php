@@ -2,16 +2,19 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/auth.php';
+auth_boot();
+auth_require();
+
 $page = $_GET['page'] ?? 'messages';
 
-$allowed = ['dashboard', 'messages', 'filtered', 'filters', 'settings'];  // ⭐ filtered اضافه شد
+$allowed = ['dashboard', 'messages', 'filtered', 'settings'];
 if (!in_array($page, $allowed, true)) $page = 'messages';
 
 $titles = [
     'dashboard' => 'داشبورد',
     'messages'  => 'پیام‌ها',
-    'filtered'  => 'پیام‌های فیلترشده',   // ⭐
-    'filters'   => 'فیلترها',
+    'filtered'  => 'پیام‌های فیلترشده',
     'settings'  => 'تنظیمات',
 ];
 
