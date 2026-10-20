@@ -271,7 +271,7 @@ $userHtml = htmlspecialchars($username, ENT_QUOTES);
             </button>
         </form>
 
-        <div class="footer-note">دسترسی فقط برای مدیران مجاز</div>
+        <div class="footer-note">مدیریت پیام های تلگرام</div>
     </div>
 
     <script>
